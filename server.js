@@ -229,7 +229,7 @@ Règles importantes:
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-5',
         max_tokens: 8192,
         system,
         messages: [{ role: 'user', content: `Analyse ce questionnaire et extrais sa structure:\n\n${text.slice(0, 12000)}` }]
@@ -288,7 +288,7 @@ app.post('/api/correct', async (req, res) => {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-5',
         max_tokens: 8192,
         system: `Tu es un expert en collecte de données. L'utilisateur te donne un formulaire JSON et des instructions de correction en langage naturel.
 Applique EXACTEMENT les corrections demandées et retourne le formulaire JSON corrigé UNIQUEMENT, sans texte autour, sans markdown.`,
