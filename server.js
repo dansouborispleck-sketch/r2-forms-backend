@@ -21,13 +21,11 @@ const PORT = process.env.PORT || 4000;
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '20mb' }));
 
-// Fichiers uploadés en mémoire (pas sur disque)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 } // 15MB max
+  limits: { fileSize: 15 * 1024 * 1024 }
 });
 
-// Servir le frontend
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ============ ROUTE: SANTÉ ============
@@ -36,7 +34,6 @@ app.get('/health', (req, res) => {
 });
 
 // ============ ROUTE: IMPORT FICHIER ============
-// Reçoit le fichier, extrait le texte, retourne le contenu brut
 app.post('/api/import', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -50,12 +47,9 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
 
     console.log(`[IMPORT] ${originalname} (${(buffer.length/1024).toFixed(0)} KB)`);
 
-    // ── TXT / CSV ──
     if (['txt', 'csv'].includes(ext)) {
       extractedText = buffer.toString('utf-8');
     }
-
-    // ── PDF ──
     else if (ext === 'pdf') {
       try {
         const pdfData = await pdf(buffer);
@@ -72,23 +66,15 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
         return res.status(422).json({ error: 'PDF_ERROR', message: 'Impossible de lire ce PDF.', metadata });
       }
     }
-
-    // ── WORD (.docx) ──
     else if (ext === 'docx') {
       try {
         const result = await mammoth.extractRawText({ buffer });
         extractedText = result.value;
-        if (result.messages.length > 0) {
-          console.log('[WORD] Avertissements:', result.messages);
-        }
       } catch (wordErr) {
         return res.status(422).json({ error: 'DOCX_ERROR', message: 'Impossible de lire ce fichier Word.' });
       }
     }
-
-    // ── WORD ANCIEN (.doc) ──
     else if (ext === 'doc') {
-      // .doc ancien format — extraction basique
       extractedText = buffer.toString('latin1')
         .replace(/[^\x20-\x7E\n\r\u00C0-\u024F]/g, ' ')
         .replace(/\s+/g, ' ')
@@ -100,8 +86,6 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
         });
       }
     }
-
-    // ── EXCEL (.xlsx / .xls) ──
     else if (['xlsx', 'xls'].includes(ext)) {
       try {
         const workbook = XLSX.read(buffer, { type: 'buffer' });
@@ -116,12 +100,8 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
         return res.status(422).json({ error: 'XLSX_ERROR', message: 'Impossible de lire ce fichier Excel.' });
       }
     }
-
-    // ── ODT ──
     else if (ext === 'odt') {
-      // ODT est un ZIP contenant content.xml
       try {
-        // Extraction basique du texte XML
         const text = buffer.toString('utf-8');
         const textMatches = text.match(/<text:p[^>]*>([^<]{2,})<\/text:p>/g) || [];
         extractedText = textMatches
@@ -135,12 +115,10 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
         return res.status(422).json({ error: 'ODT_ERROR', message: 'Impossible de lire ce fichier ODT.' });
       }
     }
-
     else {
       return res.status(400).json({ error: 'FORMAT_UNSUPPORTED', message: `Format .${ext} non supporté.` });
     }
 
-    // Nettoyage du texte
     extractedText = extractedText
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
@@ -187,7 +165,7 @@ app.post('/api/analyse', async (req, res) => {
     const system = `Tu es un expert en collecte de données terrain pour les ONG, universités et entreprises en Afrique de l'Ouest.
 Tu analyses des questionnaires et guides d'entretien et tu extrais leur structure pour les convertir en masques de saisie numériques.
 
-Réponds UNIQUEMENT en JSON valide, sans markdown ni texte autour.
+Réponds UNIQUEMENT en JSON valide, sans markdown ni texte autour. Pas de balises \`\`\`json.
 Format exact:
 {
   "title": "titre du formulaire",
@@ -230,9 +208,9 @@ Règles importantes:
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
-        max_tokens: 8192,
+        max_tokens: 16000,
         system,
-        messages: [{ role: 'user', content: `Analyse ce questionnaire et extrais sa structure:\n\n${text.slice(0, 12000)}` }]
+        messages: [{ role: 'user', content: `Analyse ce questionnaire et extrais sa structure:\n\n${text.slice(0, 8000)}` }]
       })
     });
 
@@ -247,8 +225,26 @@ Règles importantes:
 
     let form;
     try {
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      form = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
+      // Nettoyer les balises markdown si présentes
+      let cleanText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
+      let jsonStr = jsonMatch ? jsonMatch[0] : cleanText;
+
+      // Tenter de parser directement
+      try {
+        form = JSON.parse(jsonStr);
+      } catch(e) {
+        // Réparer JSON tronqué en fermant les structures ouvertes
+        console.log('[PARSE] Tentative réparation JSON tronqué...');
+        const opens = (jsonStr.match(/\[/g)||[]).length - (jsonStr.match(/\]/g)||[]).length;
+        const openb = (jsonStr.match(/\{/g)||[]).length - (jsonStr.match(/\}/g)||[]).length;
+        // Supprimer la dernière virgule si présente avant fermeture
+        jsonStr = jsonStr.replace(/,\s*$/, '');
+        for(let i = 0; i < opens; i++) jsonStr += ']';
+        for(let i = 0; i < openb; i++) jsonStr += '}';
+        form = JSON.parse(jsonStr);
+        console.log('[PARSE] ✓ JSON réparé avec succès');
+      }
     } catch (parseErr) {
       console.error('[PARSE ERROR]', parseErr, rawText.slice(0, 200));
       return res.status(502).json({ error: 'PARSE_ERROR', message: 'Réponse invalide de l\'analyse.' });
@@ -289,9 +285,9 @@ app.post('/api/correct', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
-        max_tokens: 8192,
+        max_tokens: 16000,
         system: `Tu es un expert en collecte de données. L'utilisateur te donne un formulaire JSON et des instructions de correction en langage naturel.
-Applique EXACTEMENT les corrections demandées et retourne le formulaire JSON corrigé UNIQUEMENT, sans texte autour, sans markdown.`,
+Applique EXACTEMENT les corrections demandées et retourne le formulaire JSON corrigé UNIQUEMENT, sans texte autour, sans markdown, sans balises \`\`\`json.`,
         messages: [{
           role: 'user',
           content: `Formulaire actuel:\n${JSON.stringify(form, null, 2)}\n\nInstructions de correction:\n${instructions}`
@@ -303,7 +299,8 @@ Applique EXACTEMENT les corrections demandées et retourne le formulaire JSON co
 
     const data = await response.json();
     const rawText = data.content?.[0]?.text || '{}';
-    const match = rawText.match(/\{[\s\S]*\}/);
+    let cleanText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const match = cleanText.match(/\{[\s\S]*\}/);
     const corrected = JSON.parse(match ? match[0] : '{}');
 
     console.log(`[CORRECT] ✓ ${corrected.questions?.length} questions après correction`);
@@ -327,7 +324,6 @@ app.post('/api/deploy/kobo', async (req, res) => {
 
     console.log(`[DEPLOY] KoboToolbox → ${server}`);
 
-    // 1. Authentification — récupérer le token
     const tokenRes = await fetch(`${server}/token/?format=json`, {
       method: 'GET',
       headers: { 'Authorization': 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64') }
@@ -341,7 +337,6 @@ app.post('/api/deploy/kobo', async (req, res) => {
     const token = tokenData.token;
     const auth = { 'Authorization': 'Token ' + token, 'Content-Type': 'application/json' };
 
-    // 2. Créer l'asset (formulaire vide)
     const assetRes = await fetch(`${server}/api/v2/assets/?format=json`, {
       method: 'POST',
       headers: auth,
@@ -354,11 +349,8 @@ app.post('/api/deploy/kobo', async (req, res) => {
 
     const asset = await assetRes.json();
     const assetUid = asset.uid;
-
-    // 3. Construire le contenu XLSForm
     const koboContent = buildKoboContent(form);
 
-    // 4. PATCH l'asset avec le contenu
     const patchRes = await fetch(`${server}/api/v2/assets/${assetUid}/?format=json`, {
       method: 'PATCH',
       headers: auth,
@@ -374,7 +366,6 @@ app.post('/api/deploy/kobo', async (req, res) => {
       return res.status(502).json({ error: 'PATCH_ERROR', message: 'Erreur lors de l\'import du questionnaire.' });
     }
 
-    // 5. Déployer l'asset
     const deployRes = await fetch(`${server}/api/v2/assets/${assetUid}/deployment/?format=json`, {
       method: 'POST',
       headers: auth,
@@ -382,7 +373,6 @@ app.post('/api/deploy/kobo', async (req, res) => {
     });
 
     const deployOk = deployRes.ok || deployRes.status === 201;
-
     console.log(`[DEPLOY] ✓ Asset ${assetUid} déployé`);
 
     res.json({
@@ -405,7 +395,6 @@ function buildKoboContent(form) {
   const choices = [];
   const choiceListsSeen = new Set();
 
-  // Groupes
   const groups = {};
   form.questions.forEach(q => {
     const g = q.group || 'general';
@@ -414,7 +403,6 @@ function buildKoboContent(form) {
   });
 
   Object.entries(groups).forEach(([groupName, qs]) => {
-    // Ouvrir le groupe
     if (groupName !== 'general') {
       survey.push({ type: 'begin_group', name: groupName.replace(/\s+/g, '_').toLowerCase(), label: groupName });
     }
@@ -429,26 +417,14 @@ function buildKoboContent(form) {
         hint: q.hint || ''
       };
 
-      // Logique de saut
-      if (q.linked && q.linkText) {
-        row['$given_name'] = q.id;
-        // La logique sera traduite par KoboToolbox
-      }
-
-      // Questions à choix
       if (t === 'select_one' || t === 'select_multiple') {
         const listName = 'list_' + (q.id || q.num);
         row.type = t + ' ' + listName;
-
         if (!choiceListsSeen.has(listName)) {
           choiceListsSeen.add(listName);
           (q.choices || []).forEach((c, i) => {
             const label = typeof c === 'string' ? c : (c.label || String(c));
-            choices.push({
-              list_name: listName,
-              name: 'c' + (i + 1),
-              label: label
-            });
+            choices.push({ list_name: listName, name: 'c' + (i + 1), label: label });
           });
         }
       }
@@ -456,7 +432,6 @@ function buildKoboContent(form) {
       survey.push(row);
     });
 
-    // Fermer le groupe
     if (groupName !== 'general') {
       survey.push({ type: 'end_group', name: groupName.replace(/\s+/g, '_').toLowerCase() });
     }
