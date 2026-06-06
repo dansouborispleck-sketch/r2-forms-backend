@@ -1,8 +1,3 @@
-/**
- * R2 Forms — Backend Server
- * Gère : import de fichiers, analyse Claude, déploiement KoboToolbox
- */
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -12,38 +7,32 @@ const XLSX = require('xlsx');
 const pdf = require('pdf-parse');
 const fetch = require('node-fetch');
 const path = require('path');
-const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// ============ MIDDLEWARE ============
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 }
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ============ ROUTE: SANTÉ ============
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '1.0.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '2.0.0', timestamp: new Date().toISOString() });
 });
 
-// ============ ROUTE: IMPORT FICHIER ============
+// ============ IMPORT FICHIER ============
 app.post('/api/import', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Aucun fichier reçu' });
-    }
+    if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
 
-    const { originalname, buffer, mimetype } = req.file;
+    const { originalname, buffer } = req.file;
     const ext = originalname.split('.').pop().toLowerCase();
     let extractedText = '';
-    let metadata = { filename: originalname, size: buffer.length, type: ext };
 
     console.log(`[IMPORT] ${originalname} (${(buffer.length/1024).toFixed(0)} KB)`);
 
@@ -51,384 +40,88 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
       extractedText = buffer.toString('utf-8');
     }
     else if (ext === 'pdf') {
-      try {
-        const pdfData = await pdf(buffer);
-        extractedText = pdfData.text;
-        metadata.pages = pdfData.numpages;
-        if (!extractedText || extractedText.trim().length < 20) {
-          return res.status(422).json({
-            error: 'PDF_SCANNED',
-            message: 'Ce PDF semble être une image scannée. Veuillez coller le texte directement.',
-            metadata
-          });
-        }
-      } catch (pdfErr) {
-        return res.status(422).json({ error: 'PDF_ERROR', message: 'Impossible de lire ce PDF.', metadata });
+      const pdfData = await pdf(buffer);
+      extractedText = pdfData.text;
+      if (!extractedText || extractedText.trim().length < 20) {
+        return res.status(422).json({ error: 'PDF_SCANNED', message: 'PDF scanné illisible. Collez le texte directement.' });
       }
     }
     else if (ext === 'docx') {
-      try {
-        const result = await mammoth.extractRawText({ buffer });
-        extractedText = result.value;
-      } catch (wordErr) {
-        return res.status(422).json({ error: 'DOCX_ERROR', message: 'Impossible de lire ce fichier Word.' });
-      }
+      const result = await mammoth.extractRawText({ buffer });
+      extractedText = result.value;
     }
     else if (ext === 'doc') {
-      extractedText = buffer.toString('latin1')
-        .replace(/[^\x20-\x7E\n\r\u00C0-\u024F]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (extractedText.length < 30) {
-        return res.status(422).json({
-          error: 'DOC_OLD_FORMAT',
-          message: 'Format .doc ancien non supporté. Enregistrez en .docx ou collez le texte.'
-        });
-      }
+      extractedText = buffer.toString('latin1').replace(/[^\x20-\x7E\n\r\u00C0-\u024F]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (extractedText.length < 30) return res.status(422).json({ error: 'DOC_OLD', message: 'Format .doc non supporté. Enregistrez en .docx.' });
     }
     else if (['xlsx', 'xls'].includes(ext)) {
-      try {
-        const workbook = XLSX.read(buffer, { type: 'buffer' });
-        let allText = '';
-        workbook.SheetNames.forEach(sheetName => {
-          const sheet = workbook.Sheets[sheetName];
-          const csvData = XLSX.utils.sheet_to_csv(sheet);
-          allText += `\n\n=== Feuille: ${sheetName} ===\n${csvData}`;
-        });
-        extractedText = allText.trim();
-      } catch (xlsxErr) {
-        return res.status(422).json({ error: 'XLSX_ERROR', message: 'Impossible de lire ce fichier Excel.' });
-      }
-    }
-    else if (ext === 'odt') {
-      try {
-        const text = buffer.toString('utf-8');
-        const textMatches = text.match(/<text:p[^>]*>([^<]{2,})<\/text:p>/g) || [];
-        extractedText = textMatches
-          .map(m => m.replace(/<[^>]+>/g, '').trim())
-          .filter(t => t.length > 1)
-          .join('\n');
-        if (!extractedText) {
-          extractedText = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 8000);
-        }
-      } catch (odtErr) {
-        return res.status(422).json({ error: 'ODT_ERROR', message: 'Impossible de lire ce fichier ODT.' });
-      }
+      const workbook = XLSX.read(buffer, { type: 'buffer' });
+      let allText = '';
+      workbook.SheetNames.forEach(name => {
+        allText += `\n=== ${name} ===\n` + XLSX.utils.sheet_to_csv(workbook.Sheets[name]);
+      });
+      extractedText = allText.trim();
     }
     else {
       return res.status(400).json({ error: 'FORMAT_UNSUPPORTED', message: `Format .${ext} non supporté.` });
     }
 
-    extractedText = extractedText
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
+    extractedText = extractedText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 
     if (extractedText.length < 20) {
-      return res.status(422).json({
-        error: 'EMPTY_CONTENT',
-        message: 'Le fichier semble vide ou illisible. Collez le texte directement.'
-      });
+      return res.status(422).json({ error: 'EMPTY', message: 'Fichier vide ou illisible. Collez le texte directement.' });
     }
 
-    console.log(`[IMPORT] ✓ ${extractedText.length} caractères extraits`);
-
-    res.json({
-      success: true,
-      text: extractedText,
-      preview: extractedText.slice(0, 300) + (extractedText.length > 300 ? '...' : ''),
-      metadata: { ...metadata, chars: extractedText.length }
-    });
+    console.log(`[IMPORT] ✓ ${extractedText.length} caractères`);
+    res.json({ success: true, text: extractedText, metadata: { filename: originalname, chars: extractedText.length } });
 
   } catch (err) {
-    console.error('[IMPORT ERROR]', err);
-    res.status(500).json({ error: 'SERVER_ERROR', message: 'Erreur serveur lors de l\'import.' });
+    console.error('[IMPORT ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR', message: 'Erreur import: ' + err.message });
   }
 });
 
-// ============ ROUTE: ANALYSE CLAUDE ============
-// Chunking : découpe le texte en morceaux et fusionne les résultats
+// ============ ANALYSE CLAUDE ============
+app.post('/api/analyse', async (req, res) => {
+  try {
+    const { text, tool } = req.body;
+    if (!text || text.trim().length < 10) return res.status(400).json({ error: 'Texte trop court' });
 
-const CHUNK_SIZE = 3000;    // caractères par chunk (réduit pour économiser RAM)
-const CHUNK_OVERLAP = 100;  // overlap réduit
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'Clé API manquante' });
 
-async function analyseChunk(apiKey, chunkText, tool, chunkNum, totalChunks, previousIds) {
-  const isFirst = chunkNum === 1;
-  const isLast = chunkNum === totalChunks;
+    // Limiter le texte pour économiser la mémoire
+    const inputText = text.slice(0, 8000);
+    console.log(`[ANALYSE] ${text.length} chars (envoi: ${inputText.length}) → ${tool}`);
 
-  const contextNote = totalChunks > 1
-    ? `\nPartie ${chunkNum}/${totalChunks}.${isFirst ? ' Commence depuis le debut.' : ' Ne repete pas les questions deja extraites.'}${isLast ? ' Derniere partie.' : ''}`
-    : '';
+    const system = `Expert collecte de donnees. Extrais toutes les questions du questionnaire en JSON compact.
 
-  const previousNote = previousIds.length > 0
-    ? `\nIDs deja extraits (ne pas repeter): ${previousIds.slice(-10).join(', ')}`
-    : '';
-
-  const system = `Expert collecte de donnees terrain. Analyse questionnaire et extrais questions en JSON compact.
-
-CLASSIFICATION question_class:
-quantitative(numerique mesurable: age,poids,revenu,score...), qualitative_choice(choix parmi options), qualitative_open(reponse libre), date_time, geopoint, geotrace, geoshape, media_photo, media_audio, media_video, media_file, barcode, acknowledge, ranking, scale, calculate, note
-
-FORMAT SORTIE JSON COMPACT (obligatoire, sans indentation):
-{"title":"titre","summary":"resume","questions":[{"id":"q1","num":1,"label":"libelle","question_class":"quantitative","type":"integer","required":true,"hint":"","choices":[],"group":"groupe","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}
+FORMAT (JSON compact, sans indentation):
+{"title":"titre","questions":[{"id":"q1","num":1,"label":"libelle complet","question_class":"quantitative|qualitative_choice|qualitative_open|date_time|geopoint|geotrace|geoshape|media_photo|media_audio|media_video|media_file|barcode|acknowledge|ranking|scale|calculate|note","type":"integer|decimal|text|select_one|select_multiple|date|time|datetime|geopoint|geotrace|geoshape|image|audio|video|file|barcode|acknowledge|rank|range|calculate|note","required":true,"hint":"","choices":[],"group":"groupe ou null","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}
 
 FORMATS PAR CLASSE:
 quantitative:[{"id":"A","name":"Nombre entier","type":"integer","note":"Ex: 25"},{"id":"B","name":"Nombre avec virgule","type":"decimal","note":"Ex: 65,5"},{"id":"C","name":"Valeur sur une echelle","type":"range","note":"Ex: 1 a 10"}]
 qualitative_choice:[{"id":"A","name":"Une seule reponse au choix","type":"select_one","note":"Une case"},{"id":"B","name":"Plusieurs reponses possibles","type":"select_multiple","note":"Plusieurs cases"},{"id":"C","name":"Reponse ecrite libre","type":"text","note":"Libre"}]
 qualitative_open:[{"id":"A","name":"Reponse courte","type":"text","note":"Quelques mots"},{"id":"B","name":"Reponse longue","type":"text","note":"Plusieurs phrases"}]
-date_time:[{"id":"A","name":"Date jour/mois/annee","type":"date","note":"15/03/2024"},{"id":"B","name":"Heure","type":"time","note":"14h30"},{"id":"C","name":"Date et heure","type":"datetime","note":"15/03/2024 14h30"}]
-geopoint:[{"id":"A","name":"Localisation GPS un point","type":"geopoint","note":"GPS auto"}]
-geotrace:[{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Trajet carte"}]
-geoshape:[{"id":"A","name":"Delimiter une zone GPS","type":"geoshape","note":"Perimetre carte"}]
+date_time:[{"id":"A","name":"Date","type":"date","note":"jj/mm/aaaa"},{"id":"B","name":"Heure","type":"time","note":"hh:mm"},{"id":"C","name":"Date et heure","type":"datetime","note":"jj/mm/aaaa hh:mm"}]
+geopoint:[{"id":"A","name":"Localisation GPS","type":"geopoint","note":"Point GPS"}]
+geotrace:[{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Trajet"}]
+geoshape:[{"id":"A","name":"Delimiter une zone GPS","type":"geoshape","note":"Zone"}]
 media_photo:[{"id":"A","name":"Prendre une photo","type":"image","note":"Photo"}]
 media_audio:[{"id":"A","name":"Enregistrer un son","type":"audio","note":"Audio"}]
 media_video:[{"id":"A","name":"Enregistrer une video","type":"video","note":"Video"}]
 media_file:[{"id":"A","name":"Joindre un fichier","type":"file","note":"Fichier"}]
 barcode:[{"id":"A","name":"Scanner un code-barres","type":"barcode","note":"QR/barcode"}]
-acknowledge:[{"id":"A","name":"Case a cocher pour confirmer","type":"acknowledge","note":"Une case"}]
+acknowledge:[{"id":"A","name":"Case a cocher pour confirmer","type":"acknowledge","note":"Confirmation"}]
 ranking:[{"id":"A","name":"Classer par ordre de preference","type":"rank","note":"Ordre"}]
 scale:[{"id":"A","name":"Valeur sur une echelle","type":"range","note":"Curseur"}]
-calculate:[{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calcul auto"}]
+calculate:[{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calcul"}]
 note:[{"id":"A","name":"Message information","type":"note","note":"Sans saisie"}]
 
-SUGGESTIONS (seulement si pertinent):
+SUGGESTIONS (seulement si detecte dans le doc):
 {"type":"skip_logic|calculate|constraint","label":"court","description":"clair","value":"formule XLSForm","confidence":"high|medium|low"}
-skip_logic value ex: "\${id} = 'oui'" | calculate value ex: "\${q1} + \${q2}" | constraint value ex: ". >= 0 and . <= 120"
 
-REGLES: required:true par defaut. Extrais TOUTES questions. choices[] pour qualitative_choice. JSON compact obligatoire. Outil: ${tool}${contextNote}${previousNote}`;
-
-
-  // Streaming pour économiser la mémoire
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'messages-2023-06-01'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 4096,
-      stream: false, // pas de streaming HTTP mais on optimise la mémoire autrement
-      system,
-      messages: [{ role: 'user', content: `Extrais les questions de cette partie:\n\n${chunkText}` }]
-    })
-  });
-
-  if (!response.ok) {
-    let errMsg = 'Claude API error';
-    try {
-      const errData = await response.json();
-      errMsg = errData.error?.message || JSON.stringify(errData);
-    } catch(e) {}
-    throw new Error(errMsg);
-  }
-
-  // Lire la réponse en chunks pour économiser la mémoire
-  const data = await response.json();
-  const rawText = data.content?.[0]?.text || '{}';
-  
-  // Libérer la référence data immédiatement
-  data.content = null;
-
-  // Nettoyer et parser
-  let jsonStr = rawText
-    .replace(/```json\n?/g, '')
-    .replace(/```\n?/g, '')
-    .trim();
-  
-  const jsonStart = jsonStr.indexOf('{');
-  if (jsonStart > 0) jsonStr = jsonStr.slice(jsonStart);
-
-  try {
-    const result = JSON.parse(jsonStr);
-    return result;
-  } catch(e) {
-    // Réparer JSON tronqué
-    const lastComplete = jsonStr.lastIndexOf('},');
-    if (lastComplete > 500) jsonStr = jsonStr.slice(0, lastComplete + 1);
-    jsonStr = jsonStr.replace(/,\s*$/, '');
-    const opens = (jsonStr.match(/\[/g)||[]).length - (jsonStr.match(/\]/g)||[]).length;
-    const openb = (jsonStr.match(/\{/g)||[]).length - (jsonStr.match(/\}/g)||[]).length;
-    for(let i = 0; i < Math.max(0, opens); i++) jsonStr += ']';
-    for(let i = 0; i < Math.max(0, openb); i++) jsonStr += '}';
-    return JSON.parse(jsonStr);
-  }
-}
-
-function splitIntoChunks(text, chunkSize, overlap) {
-  if (text.length <= chunkSize) return [text];
-  
-  const chunks = [];
-  let pos = 0;
-  
-  while (pos < text.length) {
-    let end = Math.min(pos + chunkSize, text.length);
-    
-    // Ne pas couper au milieu d'une ligne — reculer jusqu'au dernier saut de ligne
-    if (end < text.length) {
-      const lastNewline = text.lastIndexOf('\n', end);
-      if (lastNewline > pos + chunkSize * 0.7) {
-        end = lastNewline;
-      }
-    }
-    
-    chunks.push(text.slice(pos, end));
-    pos = end - overlap;
-    if (pos >= text.length) break;
-  }
-  
-  return chunks;
-}
-
-app.post('/api/analyse', async (req, res) => {
-  try {
-    const { text, tool } = req.body;
-    if (!text || text.trim().length < 10) {
-      return res.status(400).json({ error: 'Texte manquant ou trop court' });
-    }
-
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Clé API non configurée' });
-    }
-
-    console.log(`[ANALYSE] ${text.length} chars → ${tool}`);
-
-    // Découper en chunks si nécessaire
-    const chunks = splitIntoChunks(text, CHUNK_SIZE, CHUNK_OVERLAP);
-    console.log(`[ANALYSE] ${chunks.length} chunk(s) à traiter`);
-
-    let allQuestions = [];
-    let formTitle = '';
-    let formSummary = '';
-    let allGroups = new Set();
-    let previousIds = [];
-
-    // Traiter chaque chunk séquentiellement avec retry
-    const MAX_RETRIES = 3;
-    const failedChunks = [];
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkNum = i + 1;
-      console.log(`[ANALYSE] Chunk ${chunkNum}/${chunks.length} (${chunks[i].length} chars)`);
-      
-      let success = false;
-      let lastError = null;
-
-      // Retry jusqu'à MAX_RETRIES fois
-      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          if (attempt > 1) {
-            console.log(`[ANALYSE] Chunk ${chunkNum} — Tentative ${attempt}/${MAX_RETRIES}`);
-            await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff
-          }
-
-          const result = await analyseChunk(apiKey, chunks[i], tool, chunkNum, chunks.length, previousIds);
-          
-          if (chunkNum === 1) {
-            formTitle = result.title || 'Formulaire';
-            formSummary = result.summary || '';
-          }
-          
-          if (result.questions && Array.isArray(result.questions)) {
-            const existingLabels = new Set(allQuestions.map(q => q.label?.trim().toLowerCase()));
-            const newQuestions = result.questions.filter(q => {
-              const label = q.label?.trim().toLowerCase();
-              return label && !existingLabels.has(label);
-            });
-            
-            newQuestions.forEach((q, idx) => {
-              q.num = allQuestions.length + idx + 1;
-              q.id = `q${q.num}`;
-              existingLabels.add(q.label?.trim().toLowerCase());
-            });
-            
-            allQuestions = allQuestions.concat(newQuestions);
-            previousIds = allQuestions.map(q => q.id);
-          }
-          
-          if (result.groups && Array.isArray(result.groups)) {
-            result.groups.forEach(g => allGroups.add(g));
-          }
-          
-          console.log(`[ANALYSE] Chunk ${chunkNum}: ${result.questions?.length || 0} questions → Total: ${allQuestions.length}`);
-          success = true;
-          break; // Succès — on sort du retry
-
-        } catch(chunkErr) {
-          lastError = chunkErr.message;
-          console.error(`[ANALYSE] Chunk ${chunkNum} tentative ${attempt} échouée:`, chunkErr.message);
-        }
-      }
-
-      if (!success) {
-        // Chunk définitivement échoué après MAX_RETRIES tentatives
-        failedChunks.push(chunkNum);
-        console.error(`[ANALYSE] ❌ Chunk ${chunkNum} abandonné après ${MAX_RETRIES} tentatives`);
-      }
-
-      // Pause entre chunks pour éviter le rate limiting
-      if (i < chunks.length - 1) {
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-
-    if (allQuestions.length === 0) {
-      return res.status(422).json({ 
-        error: 'NO_QUESTIONS', 
-        message: 'Aucune question détectée dans le document.' 
-      });
-    }
-
-    // Avertir si des chunks ont échoué
-    const hasFailures = failedChunks.length > 0;
-    if (hasFailures) {
-      console.warn(`[ANALYSE] ⚠️ ${failedChunks.length} chunk(s) échoué(s): ${failedChunks.join(', ')}`);
-    }
-
-    const form = {
-      title: formTitle,
-      summary: formSummary,
-      questions: allQuestions,
-      groups: [...allGroups]
-    };
-
-    console.log(`[ANALYSE] ✓ ${form.questions.length} questions extraites au total`);
-    
-    // Retourner avec avertissement si des sections ont échoué
-    const responseData = { 
-      success: true, 
-      form,
-      chunks_total: chunks.length,
-      chunks_failed: failedChunks.length,
-      warning: hasFailures 
-        ? `Attention : ${failedChunks.length} section(s) du questionnaire n'ont pas pu être traitées (sections ${failedChunks.join(', ')}). Le masque peut être incomplet. Nous vous recommandons de vérifier toutes les questions avant de déployer.`
-        : null
-    };
-    
-    res.json(responseData);
-
-  } catch (err) {
-    console.error('[ANALYSE ERROR]', err);
-    res.status(500).json({ error: 'SERVER_ERROR', message: 'Erreur serveur lors de l\'analyse.' });
-  }
-});
-
-// ============ ROUTE: CORRECTION CLAUDE ============
-app.post('/api/correct', async (req, res) => {
-  try {
-    const { form, instructions } = req.body;
-    if (!form || !instructions) {
-      return res.status(400).json({ error: 'Données manquantes' });
-    }
-
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Clé API non configurée' });
-
-    console.log(`[CORRECT] Instructions: ${instructions.slice(0, 100)}`);
+REGLES: required=true par defaut. Extrais TOUTES questions. choices[] pour qualitative_choice. JSON compact. Outil: ${tool}`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -439,42 +132,111 @@ app.post('/api/correct', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
-        max_tokens: 16000,
-        system: `Tu es un expert en collecte de données. L'utilisateur te donne un formulaire JSON et des instructions de correction en langage naturel.
-Applique EXACTEMENT les corrections demandées et retourne le formulaire JSON corrigé UNIQUEMENT, sans texte autour, sans markdown, sans balises \`\`\`json.`,
-        messages: [{
-          role: 'user',
-          content: `Formulaire actuel:\n${JSON.stringify(form, null, 2)}\n\nInstructions de correction:\n${instructions}`
-        }]
+        max_tokens: 4096,
+        system,
+        messages: [{ role: 'user', content: `Extrais toutes les questions:\n\n${inputText}` }]
+      })
+    });
+
+    if (!response.ok) {
+      const errData = await response.json();
+      console.error('[CLAUDE ERROR]', errData);
+      return res.status(502).json({ error: 'CLAUDE_ERROR', message: 'Erreur API Claude.' });
+    }
+
+    const data = await response.json();
+    const rawText = data.content?.[0]?.text || '{}';
+
+    let form;
+    try {
+      let jsonStr = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const jsonStart = jsonStr.indexOf('{');
+      if (jsonStart > 0) jsonStr = jsonStr.slice(jsonStart);
+
+      try {
+        form = JSON.parse(jsonStr);
+      } catch(e) {
+        // Réparer JSON tronqué
+        const lastComplete = jsonStr.lastIndexOf('},');
+        if (lastComplete > 100) jsonStr = jsonStr.slice(0, lastComplete + 1);
+        jsonStr = jsonStr.replace(/,\s*$/, '');
+        const opens = (jsonStr.match(/\[/g)||[]).length - (jsonStr.match(/\]/g)||[]).length;
+        const openb = (jsonStr.match(/\{/g)||[]).length - (jsonStr.match(/\}/g)||[]).length;
+        for(let i = 0; i < Math.max(0,opens); i++) jsonStr += ']';
+        for(let i = 0; i < Math.max(0,openb); i++) jsonStr += '}';
+        form = JSON.parse(jsonStr);
+        console.log('[PARSE] JSON réparé');
+      }
+    } catch (parseErr) {
+      console.error('[PARSE ERROR]', parseErr.message);
+      return res.status(502).json({ error: 'PARSE_ERROR', message: 'Réponse invalide.' });
+    }
+
+    if (!form.questions || !Array.isArray(form.questions)) {
+      return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question détectée.' });
+    }
+
+    const truncated = text.length > 8000;
+    console.log(`[ANALYSE] ✓ ${form.questions.length} questions${truncated ? ' (questionnaire tronqué à 8000 chars)' : ''}`);
+    
+    res.json({ 
+      success: true, 
+      form,
+      truncated,
+      warning: truncated ? `Votre questionnaire est long (${text.length} caractères). Seules les ${inputText.length} premiers caractères ont été analysés. Les questions restantes peuvent être ajoutées manuellement.` : null
+    });
+
+  } catch (err) {
+    console.error('[ANALYSE ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR', message: 'Erreur analyse.' });
+  }
+});
+
+// ============ CORRECTION CLAUDE ============
+app.post('/api/correct', async (req, res) => {
+  try {
+    const { form, instructions } = req.body;
+    if (!form || !instructions) return res.status(400).json({ error: 'Données manquantes' });
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'Clé API manquante' });
+
+    console.log(`[CORRECT] ${instructions.slice(0, 80)}`);
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 4096,
+        system: 'Expert collecte de donnees. Applique les corrections au formulaire JSON et retourne JSON corrigé UNIQUEMENT, sans markdown.',
+        messages: [{ role: 'user', content: `Formulaire:\n${JSON.stringify(form)}\n\nCorrections:\n${instructions}` }]
       })
     });
 
     if (!response.ok) return res.status(502).json({ error: 'CLAUDE_ERROR' });
 
     const data = await response.json();
-    const rawText = data.content?.[0]?.text || '{}';
-    let cleanText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const match = cleanText.match(/\{[\s\S]*\}/);
+    let rawText = data.content?.[0]?.text || '{}';
+    rawText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const match = rawText.match(/\{[\s\S]*/);
     const corrected = JSON.parse(match ? match[0] : '{}');
 
-    console.log(`[CORRECT] ✓ ${corrected.questions?.length} questions après correction`);
+    console.log(`[CORRECT] ✓ ${corrected.questions?.length} questions`);
     res.json({ success: true, form: corrected });
 
   } catch (err) {
-    console.error('[CORRECT ERROR]', err);
+    console.error('[CORRECT ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
 
-// ============ ROUTE: DÉPLOIEMENT KOBOTOOLBOX ============
+// ============ DÉPLOIEMENT KOBOTOOLBOX ============
 app.post('/api/deploy/kobo', async (req, res) => {
   try {
     const { form, credentials } = req.body;
     const { username, password, server = 'https://kf.kobotoolbox.org' } = credentials;
-
-    if (!form || !username || !password) {
-      return res.status(400).json({ error: 'Données manquantes' });
-    }
+    if (!form || !username || !password) return res.status(400).json({ error: 'Données manquantes' });
 
     console.log(`[DEPLOY] KoboToolbox → ${server}`);
 
@@ -482,64 +244,41 @@ app.post('/api/deploy/kobo', async (req, res) => {
       method: 'GET',
       headers: { 'Authorization': 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64') }
     });
+    if (!tokenRes.ok) return res.status(401).json({ error: 'AUTH_ERROR', message: 'Identifiants incorrects.' });
 
-    if (!tokenRes.ok) {
-      return res.status(401).json({ error: 'AUTH_ERROR', message: 'Identifiants incorrects. Vérifiez votre email et mot de passe KoboToolbox.' });
-    }
-
-    const tokenData = await tokenRes.json();
-    const token = tokenData.token;
+    const { token } = await tokenRes.json();
     const auth = { 'Authorization': 'Token ' + token, 'Content-Type': 'application/json' };
 
     const assetRes = await fetch(`${server}/api/v2/assets/?format=json`, {
-      method: 'POST',
-      headers: auth,
+      method: 'POST', headers: auth,
       body: JSON.stringify({ name: form.title || 'Formulaire R2', asset_type: 'survey' })
     });
+    if (!assetRes.ok) return res.status(502).json({ error: 'ASSET_ERROR', message: 'Erreur création formulaire.' });
 
-    if (!assetRes.ok) {
-      return res.status(502).json({ error: 'ASSET_ERROR', message: 'Erreur lors de la création du formulaire.' });
-    }
-
-    const asset = await assetRes.json();
-    const assetUid = asset.uid;
+    const { uid: assetUid } = await assetRes.json();
     const koboContent = buildKoboContent(form);
 
     const patchRes = await fetch(`${server}/api/v2/assets/${assetUid}/?format=json`, {
-      method: 'PATCH',
-      headers: auth,
-      body: JSON.stringify({
-        name: form.title || 'Formulaire R2',
-        content: koboContent
-      })
+      method: 'PATCH', headers: auth,
+      body: JSON.stringify({ name: form.title || 'Formulaire R2', content: koboContent })
     });
-
     if (!patchRes.ok) {
       const errBody = await patchRes.text();
       console.error('[PATCH ERROR]', errBody);
-      return res.status(502).json({ error: 'PATCH_ERROR', message: 'Erreur lors de l\'import du questionnaire.' });
+      return res.status(502).json({ error: 'PATCH_ERROR', message: 'Erreur import questionnaire.' });
     }
 
-    const deployRes = await fetch(`${server}/api/v2/assets/${assetUid}/deployment/?format=json`, {
-      method: 'POST',
-      headers: auth,
+    await fetch(`${server}/api/v2/assets/${assetUid}/deployment/?format=json`, {
+      method: 'POST', headers: auth,
       body: JSON.stringify({ active: true })
     });
 
-    const deployOk = deployRes.ok || deployRes.status === 201;
-    console.log(`[DEPLOY] ✓ Asset ${assetUid} déployé`);
-
-    res.json({
-      success: true,
-      uid: assetUid,
-      url: `${server}/#/forms/${assetUid}/summary`,
-      deployed: deployOk,
-      questions: form.questions?.length || 0
-    });
+    console.log(`[DEPLOY] ✓ ${assetUid}`);
+    res.json({ success: true, uid: assetUid, url: `${server}/#/forms/${assetUid}/summary`, questions: form.questions?.length || 0 });
 
   } catch (err) {
-    console.error('[DEPLOY ERROR]', err);
-    res.status(500).json({ error: 'SERVER_ERROR', message: 'Erreur serveur lors du déploiement.' });
+    console.error('[DEPLOY ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
   }
 });
 
@@ -547,101 +286,59 @@ app.post('/api/deploy/kobo', async (req, res) => {
 function buildKoboContent(form) {
   const survey = [];
   const choices = [];
-  const choiceListsSeen = new Set();
+  const seen = new Set();
 
   const groups = {};
-  form.questions.forEach(q => {
+  (form.questions || []).forEach(q => {
     const g = q.group || 'general';
     if (!groups[g]) groups[g] = [];
     groups[g].push(q);
   });
 
-  Object.entries(groups).forEach(([groupName, qs]) => {
-    if (groupName !== 'general') {
-      survey.push({ type: 'begin_group', name: groupName.replace(/\s+/g, '_').toLowerCase(), label: groupName });
+  Object.entries(groups).forEach(([gname, qs]) => {
+    if (gname !== 'general') {
+      survey.push({ type: 'begin_group', name: gname.replace(/\s+/g,'_').toLowerCase().replace(/[^a-z0-9_]/g,''), label: gname });
     }
 
     qs.forEach(q => {
       const t = q.selectedType || q.type || 'text';
-      const name = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+      const name = (q.id || ('q'+q.num)).replace(/[^a-zA-Z0-9_]/g,'_');
+      const row = { type: t, name, label: q.label || '', required: q.required !== false ? 'yes' : 'no', hint: q.hint || '' };
 
-      const row = {
-        type: t,
-        name: name,
-        label: q.label || '',
-        required: q.required !== false ? 'yes' : 'no',
-        hint: q.hint || ''
-      };
+      if (q.relevant && q.relevant.trim()) row.relevant = q.relevant.trim();
+      if (t === 'calculate' && q.calculation) { row.calculation = q.calculation; delete row.required; }
+      if (q.constraint && q.constraint.trim()) { row.constraint = q.constraint.trim(); row.constraint_message = 'Valeur hors limites'; }
+      if (t === 'range' && (q.numMin || q.numMax)) row.parameters = `start=${q.numMin||1} end=${q.numMax||10}`;
+      if (['note','calculate'].includes(t)) delete row.required;
 
-      // Logique de saut (relevant)
-      if (q.relevant && q.relevant.trim()) {
-        row.relevant = q.relevant.trim();
-      }
-
-      // Calcul automatique
-      if (t === 'calculate' && q.calculation) {
-        row.calculation = q.calculation;
-        row.type = 'calculate';
-        delete row.required;
-      }
-
-      // Contrainte de valeur (min/max + chiffres avant/après virgule)
-      if (q.constraint && q.constraint.trim()) {
-        row.constraint = q.constraint.trim();
-        row.constraint_message = lang === 'fr' ? 'Valeur hors des limites acceptées' : 'Value out of accepted range';
-      }
-
-      // Range — paramètres min/max
-      if (t === 'range' && (q.numMin || q.numMax)) {
-        const rangeMin = q.numMin || '1';
-        const rangeMax = q.numMax || '10';
-        row.parameters = `start=${rangeMin} end=${rangeMax}`;
-      }
-
-      // Questions à choix (select_one, select_multiple, rank)
-      if (t === 'select_one' || t === 'select_multiple' || t === 'rank') {
+      if (['select_one','select_multiple','rank'].includes(t)) {
         const listName = 'list_' + name;
         row.type = t + ' ' + listName;
-        if (!choiceListsSeen.has(listName)) {
-          choiceListsSeen.add(listName);
+        if (!seen.has(listName)) {
+          seen.add(listName);
           (q.choices || []).forEach((c, i) => {
             const label = typeof c === 'string' ? c : (c.label || String(c));
-            const val = label.toLowerCase()
-              .normalize('NFD').replace(/[̀-ͯ]/g, '')
-              .replace(/[^a-z0-9_]/g, '_')
-              .replace(/__+/g,'_')
-              .replace(/^_|_$/g,'')
-              .slice(0,30) || ('c' + (i+1));
-            choices.push({ list_name: listName, name: val, label: label });
+            const val = label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'').slice(0,30) || ('c'+(i+1));
+            choices.push({ list_name: listName, name: val, label });
           });
         }
-      }
-
-      // Types sans required (note, calculate)
-      if (t === 'note' || t === 'calculate') {
-        delete row.required;
       }
 
       survey.push(row);
     });
 
-    if (groupName !== 'general') {
-      survey.push({ type: 'end_group', name: groupName.replace(/\s+/g, '_').toLowerCase() });
+    if (gname !== 'general') {
+      survey.push({ type: 'end_group', name: gname.replace(/\s+/g,'_').toLowerCase().replace(/[^a-z0-9_]/g,'') });
     }
   });
 
   return {
     survey,
     choices,
-    settings: [{
-      form_title: form.title || 'Formulaire',
-      form_id: (form.title || 'formulaire').replace(/\s+/g, '_').toLowerCase().replace(/[^a-z0-9_]/g, ''),
-      version: '1'
-    }]
+    settings: [{ form_title: form.title || 'Formulaire', form_id: (form.title||'formulaire').replace(/\s+/g,'_').toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,32), version: '1' }]
   };
 }
 
-// ============ DÉMARRAGE ============
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════╗
