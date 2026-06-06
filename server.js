@@ -166,7 +166,29 @@ app.post('/api/analyse', async (req, res) => {
 Tu analyses des questionnaires et extrais leur structure COMPLÈTE avec toute la logique interne.
 
 Réponds UNIQUEMENT en JSON valide, sans markdown ni texte autour.
-Format exact:
+
+=== CLASSIFICATION DES QUESTIONS ===
+Pour chaque question, détermine sa classe selon sa nature réelle :
+
+- quantitative : variable numérique mesurable (âge, poids, taille, revenu, score, durée, distance, température, quantité, nombre de...). JAMAIS de choix pour ces questions.
+- qualitative_choice : réponse choisie parmi des options définies (sexe, niveau d'instruction, statut, oui/non, catégories...)
+- qualitative_open : réponse libre sans options (nom, commentaire, description, adresse, opinion...)
+- date_time : question de date, heure ou date+heure
+- geopoint : localisation GPS précise (un point)
+- geotrace : trajet ou chemin GPS (plusieurs points formant une ligne)
+- geoshape : zone ou périmètre GPS (surface fermée)
+- media_photo : question demandant une photo
+- media_audio : question demandant un enregistrement audio
+- media_video : question demandant une vidéo
+- media_file : question demandant un fichier joint
+- barcode : scan de code-barres ou QR code
+- acknowledge : question d'accord ou de confirmation (case à cocher simple)
+- ranking : question de classement par ordre de préférence
+- scale : échelle ou curseur numérique (satisfaction de 1 à 5, score de 0 à 10...)
+- calculate : variable calculée automatiquement à partir d'autres questions
+- note : information ou instruction sans réponse
+
+=== FORMAT DE SORTIE ===
 {
   "title": "titre du formulaire",
   "summary": "résumé en 1 phrase",
@@ -174,52 +196,84 @@ Format exact:
     {
       "id": "q1",
       "num": 1,
-      "label": "libellé complet",
-      "type": "text",
+      "label": "libellé complet de la question",
+      "question_class": "quantitative|qualitative_choice|qualitative_open|date_time|geopoint|geotrace|geoshape|media_photo|media_audio|media_video|media_file|barcode|acknowledge|ranking|scale|calculate|note",
+      "type": "integer|decimal|text|select_one|select_multiple|date|time|datetime|geopoint|geotrace|geoshape|image|audio|video|file|barcode|acknowledge|rank|range|calculate|note",
       "required": true,
       "hint": "",
-      "choices": ["choix1", "choix2"],
+      "choices": [],
       "group": "nom du groupe ou null",
-      "formats": [
-        {"id": "A", "name": "Choix unique", "type": "select_one", "note": "Une seule réponse possible"},
-        {"id": "B", "name": "Choix multiple", "type": "select_multiple", "note": "Plusieurs réponses possibles"},
-        {"id": "C", "name": "Texte libre", "type": "text", "note": "Le répondant écrit sa propre réponse"}
-      ],
+      "formats": [],
       "suggested_format_idx": 0,
-      "is_numeric": false,
       "suggestions": []
     }
   ],
   "groups": ["Groupe 1"]
 }
 
-RÈGLES IMPORTANTES:
+=== FORMATS SELON LA CLASSE ===
 
-1. TOUTES les questions sont required:true par défaut sauf si explicitement facultatif dans le document.
+quantitative:
+formats = [
+  {"id":"A","name":"Nombre entier","type":"integer","note":"Ex : 25, 150, 3 — sans virgule"},
+  {"id":"B","name":"Nombre avec virgule","type":"decimal","note":"Ex : 65,5 kg, 37,8°C, 12,45%"},
+  {"id":"C","name":"Valeur sur une échelle","type":"range","note":"Ex : satisfaction de 1 à 10, score de 0 à 5"}
+]
+suggested_format_idx = 0 si entier attendu, 1 si décimal, 2 si échelle
 
-2. is_numeric:true uniquement pour les questions de type integer ou decimal.
+qualitative_choice:
+formats = [
+  {"id":"A","name":"Une seule réponse au choix","type":"select_one","note":"Ex : Masculin ou Féminin — le répondant ne coche qu'une case"},
+  {"id":"B","name":"Plusieurs réponses possibles","type":"select_multiple","note":"Ex : Maladies déclarées — le répondant peut cocher plusieurs cases"},
+  {"id":"C","name":"Réponse écrite libre","type":"text","note":"Le répondant écrit lui-même sa réponse sans liste prédéfinie"}
+]
 
-3. SUGGESTIONS — analyse toute la logique du questionnaire:
-   Format d'une suggestion: {"type":"...","label":"...","description":"...","value":"...","confidence":"high|medium|low"}
-   
-   Types disponibles:
-   - skip_logic: saut conditionnel. La condition s'applique UNIQUEMENT sur la question qui doit s'afficher conditionnellement (pas sur la question source). value = formule XLSForm relevant ex: "\${id_question} = 'oui'" ou "\${id_question} != ''" ou "selected(\${id_question}, 'valeur')"
-   - calculate: calcul automatique. Toutes formes possibles: somme, difference, produit, quotient, pourcentage, moyenne, etc. value = formule XLSForm ex: "\${q5} div (\${q6} * \${q6}) * 10000" ou "\${q3} + \${q4}" ou "\${q5} * 100 div \${q6}"
-   - required_override: cette question devrait etre facultative malgre le defaut obligatoire
+qualitative_open:
+formats = [
+  {"id":"A","name":"Réponse courte","type":"text","note":"Ex : nom, prénom, profession — quelques mots"},
+  {"id":"B","name":"Réponse longue","type":"text","note":"Ex : commentaire, description, observation — plusieurs phrases"}
+]
 
-4. Pour skip_logic: la formule XLSForm doit referencer l'ID exact de la question source (ex: \${id_question}). Utilise selected() pour les questions a choix multiple.
+date_time:
+formats = [
+  {"id":"A","name":"Date (jour/mois/année)","type":"date","note":"Ex : 15/03/2024"},
+  {"id":"B","name":"Heure","type":"time","note":"Ex : 14h30"},
+  {"id":"C","name":"Date et heure ensemble","type":"datetime","note":"Ex : 15/03/2024 à 14h30"}
+]
 
-5. Pour calculate: le type de la question devient automatiquement "calculate", la formule va dans le champ calculation XLSForm.
+geopoint: formats = [{"id":"A","name":"Localisation GPS (un point précis)","type":"geopoint","note":"Capture automatiquement la position GPS du téléphone"}]
+geotrace: formats = [{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Enregistre un trajet ou une route sur la carte"}]
+geoshape: formats = [{"id":"A","name":"Délimiter une zone GPS","type":"geoshape","note":"Dessine un périmètre ou une superficie sur la carte"}]
+media_photo: formats = [{"id":"A","name":"Prendre une photo","type":"image","note":"L'enquêteur prend une photo avec l'appareil photo"}]
+media_audio: formats = [{"id":"A","name":"Enregistrer un son","type":"audio","note":"Enregistre un message audio ou un entretien"}]
+media_video: formats = [{"id":"A","name":"Enregistrer une vidéo","type":"video","note":"Enregistre une vidéo avec la caméra"}]
+media_file: formats = [{"id":"A","name":"Joindre un fichier","type":"file","note":"Le répondant joint un document PDF, Excel ou autre"}]
+barcode: formats = [{"id":"A","name":"Scanner un code-barres","type":"barcode","note":"Scanne un code QR ou code-barres avec la caméra"}]
+acknowledge: formats = [{"id":"A","name":"Case à cocher pour confirmer","type":"acknowledge","note":"Ex : J'ai lu et accepté les conditions — une seule case à cocher"}]
+ranking: formats = [{"id":"A","name":"Classer par ordre de préférence","type":"rank","note":"Ex : Classer ces services du plus important au moins important"}]
+scale: formats = [{"id":"A","name":"Valeur sur une échelle","type":"range","note":"Ex : Satisfaction de 1 à 5, douleur de 0 à 10"}]
+calculate: formats = [{"id":"A","name":"Valeur calculée automatiquement","type":"calculate","note":"La valeur est calculée à partir des autres réponses, invisible pour le répondant"}]
+note: formats = [{"id":"A","name":"Message d'information","type":"note","note":"Affiche un texte ou une instruction sans demander de réponse"}]
 
-6. Ne génère des suggestions que si vraiment pertinent et détectable dans le document.
+=== SUGGESTIONS ===
+Analyse TOUTE la logique du questionnaire. Pour chaque question, génère les suggestions pertinentes :
+Format : {"type":"skip_logic|calculate|constraint","label":"libellé court en langage simple","description":"explication claire sans jargon","value":"formule XLSForm technique","confidence":"high|medium|low"}
 
-7. suggested_format_idx: index du format recommandé (0, 1 ou 2).
+- skip_logic : saut conditionnel. La condition s'applique sur la question qui doit s'afficher conditionnellement. value = formule XLSForm ex: "\${id_q} = 'oui'" ou "selected(\${id_q}, 'valeur')"
+- calculate : calcul auto. Toutes formes : somme, différence, produit, quotient, pourcentage, moyenne, min, max. value = formule XLSForm
+- constraint : contrainte logique. value = formule XLSForm ex: ". >= 0 and . <= 150"
 
-8. Pour GPS: type geopoint. Pour photos: type image. Pour dates: type date.
+Ne génère des suggestions que si vraiment pertinent. confidence=high si explicitement dans le doc, medium si fortement suggéré.
 
-9. Regroupe par thématique dans "group". Respecte l'ordre original.
+=== AUTRES RÈGLES ===
+- Toutes questions required:true par défaut sauf si explicitement facultatif
+- Respecte l'ordre original. Regroupe par thématique dans "group"
+- Extrais TOUTES les questions et sous-questions
+- Pour qualitative_choice : extrais les vraies modalités dans choices[]
+- Outil cible: \${tool}
+`;
 
-10. Outil cible: \${tool}.`;
+
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -453,24 +507,41 @@ function buildKoboContent(form) {
         delete row.required;
       }
 
-      // Contrainte de valeur
+      // Contrainte de valeur (min/max + chiffres avant/après virgule)
       if (q.constraint && q.constraint.trim()) {
         row.constraint = q.constraint.trim();
-        row.constraint_message = 'Valeur hors des limites acceptées';
+        row.constraint_message = lang === 'fr' ? 'Valeur hors des limites acceptées' : 'Value out of accepted range';
       }
 
-      // Questions à choix
-      if (t === 'select_one' || t === 'select_multiple') {
+      // Range — paramètres min/max
+      if (t === 'range' && (q.numMin || q.numMax)) {
+        const rangeMin = q.numMin || '1';
+        const rangeMax = q.numMax || '10';
+        row.parameters = `start=${rangeMin} end=${rangeMax}`;
+      }
+
+      // Questions à choix (select_one, select_multiple, rank)
+      if (t === 'select_one' || t === 'select_multiple' || t === 'rank') {
         const listName = 'list_' + name;
         row.type = t + ' ' + listName;
         if (!choiceListsSeen.has(listName)) {
           choiceListsSeen.add(listName);
           (q.choices || []).forEach((c, i) => {
             const label = typeof c === 'string' ? c : (c.label || String(c));
-            const val = label.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/__+/g,'_').slice(0,30) || ('c' + (i+1));
+            const val = label.toLowerCase()
+              .normalize('NFD').replace(/[̀-ͯ]/g, '')
+              .replace(/[^a-z0-9_]/g, '_')
+              .replace(/__+/g,'_')
+              .replace(/^_|_$/g,'')
+              .slice(0,30) || ('c' + (i+1));
             choices.push({ list_name: listName, name: val, label: label });
           });
         }
+      }
+
+      // Types sans required (note, calculate)
+      if (t === 'note' || t === 'calculate') {
+        delete row.required;
       }
 
       survey.push(row);
