@@ -76,7 +76,10 @@ app.post('/api/analyse', async (req, res) => {
       '   - required=false sur cette question',
       '   - suggestion skip_logic: s\'affiche si la question parente = valeur numerique de "Autres" (ex: "selected(${id_parent}, \'autres\')" ou "${id_parent} = \'4\'")',
       '4. SAUTS CONDITIONNELS: Detecte TOUS les sauts meme implicites. Ex: "Si Oui, lesquels?" => la question suivante est conditionnelle. Ex: Q19=Oui => Q20 a Q25 conditionnelles.',
-      '5. VALEURS XLSForm: Pour les skip_logic, utilise la VALEUR NUMERIQUE ou le CODE de la modalite (0, 1, 2...) pas son libelle. Ex: si Oui=1, la condition est "${q19} = \'1\'" pas "${q19} = \'oui\'".',
+      '5. VALEURS XLSForm OBLIGATOIRE: Pour les skip_logic utilise TOUJOURS le code numerique (0,1,2...) de la modalite, JAMAIS son libelle.',
+      '   Ex: modalites=[Non=code0, Oui=code1] -> condition sur Oui: "${q19} = \'1\'" et NON "${q19} = \'oui\'"',
+      '   Ex: pour select_multiple: "selected(${q13}, \'4\')" pour tester si valeur code 4 selectionnee',
+      '   choice_values[] dans ta reponse doit contenir les codes: ["0","1","2",...] dans le meme ordre que choices[]',
       '6. QUESTIONS MANQUANTES: Si des numeros manquent dans la sequence (ex: Q15 puis Q18 sans Q16/Q17), le signaler dans coherence_report.',
       '7. NUMEROTATION: Numerote toutes les questions en continu dans l\'ordre d\'apparition.',
       '',
@@ -118,7 +121,7 @@ app.post('/api/analyse', async (req, res) => {
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
-        max_tokens: 4096,
+        max_tokens: 8192,
         system: system,
         messages: [{ role: 'user', content: 'Extrais TOUTES les questions de ce questionnaire sans en oublier aucune:\n\n' + inputText }]
       })
@@ -341,16 +344,24 @@ function buildKoboContent(form) {
       };
 
       // Skip logic — utilise les suggestions confirmées
-      var relevant = q.relevant || '';
-      if (!relevant && q.suggestions) {
+      var relevant = '';
+      if (q.suggestions) {
         q.suggestions.forEach(function(s, si) {
-          if (s.type === 'skip_logic' && s.value) {
+          if (s.type === 'skip_logic' && s.value && s.value.trim()) {
             var confirmed = q.confirmedSuggestions && q.confirmedSuggestions[si];
-            if (confirmed) relevant = s.value;
+            if (confirmed) {
+              // Nettoyer et valider la formule XLSForm
+              var formula = s.value.trim();
+              // S'assurer que les références sont au bon format ${nom}
+              // Remplacer les libelles texte par les codes si possible
+              relevant = formula;
+            }
           }
         });
       }
-      if (relevant && relevant.trim()) row.relevant = relevant.trim();
+      // Fallback sur q.relevant s'il existe et qu'aucune suggestion n'est confirmée
+      if (!relevant && q.relevant && q.relevant.trim()) relevant = q.relevant.trim();
+      if (relevant) row.relevant = relevant;
 
       // Calcul
       if (t === 'calculate') {
@@ -399,9 +410,15 @@ function buildKoboContent(form) {
           var choiceVals = q.choice_values || [];
           (q.choices || []).forEach(function(c, i) {
             var label = typeof c === 'string' ? c : (c.label || String(c));
-            // Use numeric code if available, otherwise generate safe name
-            var val = choiceVals[i] !== undefined ? String(choiceVals[i]) : 
-              label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'').slice(0,30) || ('c'+(i+1));
+            // Toujours utiliser le code numérique (0, 1, 2...) comme valeur XLSForm
+            // C'est ce que KoboCollect utilise dans les formules relevant
+            var val;
+            if (choiceVals[i] !== undefined && choiceVals[i] !== '') {
+              val = String(choiceVals[i]);
+            } else {
+              // Par défaut: code numérique basé sur l'index (0, 1, 2...)
+              val = String(i);
+            }
             choices.push({ list_name: listName, name: val, label: label });
           });
         }
