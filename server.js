@@ -163,12 +163,13 @@ app.post('/api/analyse', async (req, res) => {
     console.log(`[ANALYSE] ${text.length} chars → ${tool}`);
 
     const system = `Tu es un expert en collecte de données terrain pour les ONG, universités et entreprises en Afrique de l'Ouest.
-Tu analyses des questionnaires et guides d'entretien et tu extrais leur structure pour les convertir en masques de saisie numériques.
+Tu analyses des questionnaires et guides d'entretien et tu extrais leur structure COMPLÈTE avec toute la logique interne.
 
-Réponds UNIQUEMENT en JSON valide, sans markdown ni texte autour. Pas de balises \`\`\`json.
+Réponds UNIQUEMENT en JSON valide, sans markdown ni texte autour.
 Format exact:
 {
   "title": "titre du formulaire",
+  "summary": "résumé en 1 phrase du questionnaire",
   "questions": [
     {
       "id": "q1",
@@ -183,20 +184,35 @@ Format exact:
         {"id": "A", "name": "Choix unique", "type": "select_one", "note": "Une seule réponse possible"},
         {"id": "B", "name": "Choix multiple", "type": "select_multiple", "note": "Plusieurs réponses possibles"},
         {"id": "C", "name": "Texte libre", "type": "text", "note": "Le répondant écrit sa propre réponse"}
-      ]
+      ],
+      "suggested_format_idx": 0,
+      "suggestions": []
     }
   ],
   "groups": ["Groupe 1", "Groupe 2"]
 }
 
-Règles importantes:
-- Extrais TOUTES les questions du document, même les sous-questions
-- Pour les questions à choix, mets les vraies options dans "choices" et propose select_one + select_multiple + text dans formats
-- Pour les questions ouvertes, propose text + integer/decimal/date selon le contexte dans formats (2 options max)
+Règles pour les suggestions (tableau "suggestions" de chaque question):
+- Analyse TOUTE la logique du questionnaire avant de remplir les suggestions
+- Ne mets que les suggestions réellement pertinentes et détectées
+- Types disponibles:
+  * skip_logic: saut conditionnel détecté (ex: "si sexe=masculin, passer Q8")
+  * calculate: question calculable automatiquement (ex: IMC, âge depuis date naissance)
+  * constraint: contrainte de valeur logique (ex: âge entre 0 et 120)
+  * required: question qui semble obligatoire selon le contexte
+  * repeat: groupe de questions à répéter (ex: "pour chaque membre du ménage")
+- Format d'une suggestion: {"type":"skip_logic","label":"Saut conditionnel détecté","description":"explication claire en français","value":"formule XLSForm","confidence":"high|medium|low"}
+- confidence: high=explicitement dans le doc, medium=fortement suggéré, low=possible
+- suggested_format_idx: index du format le plus adapté (0, 1 ou 2)
+
+Autres règles:
+- Extrais TOUTES les questions, même les sous-questions
+- Pour les questions à choix: propose select_one + select_multiple + text dans formats
+- Pour les questions ouvertes: propose 2 formats adaptés (text, integer, decimal, date...)
 - Pour GPS/localisation: type geopoint
 - Pour photos: type image
-- Regroupe les questions par thématique logique dans "group"
-- Respecte l'ordre original des questions
+- Regroupe par thématique logique dans "group"
+- Respecte l'ordre original
 - Outil cible: ${tool}`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
