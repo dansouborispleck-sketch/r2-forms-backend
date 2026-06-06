@@ -13,42 +13,38 @@ const PORT = process.env.PORT || 4000;
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
-
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '3.0.0' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '3.1.0' }));
 
 // ============ IMPORT ============
 app.post('/api/import', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
+    if (!req.file) return res.status(400).json({ error: 'Aucun fichier recu' });
     const { originalname, buffer } = req.file;
     const ext = originalname.split('.').pop().toLowerCase();
     let text = '';
     console.log(`[IMPORT] ${originalname}`);
-
     if (['txt','csv'].includes(ext)) text = buffer.toString('utf-8');
     else if (ext === 'pdf') {
       const d = await pdf(buffer);
       text = d.text;
-      if (!text || text.trim().length < 20) return res.status(422).json({ error: 'PDF_SCANNED', message: 'PDF scanné illisible. Collez le texte directement.' });
+      if (!text || text.trim().length < 20) return res.status(422).json({ error: 'PDF_SCANNED', message: 'PDF scanne illisible. Collez le texte directement.' });
     }
     else if (ext === 'docx') { const r = await mammoth.extractRawText({ buffer }); text = r.value; }
     else if (ext === 'doc') {
       text = buffer.toString('latin1').replace(/[^\x20-\x7E\n\r\u00C0-\u024F]/g,' ').replace(/\s+/g,' ').trim();
-      if (text.length < 30) return res.status(422).json({ error: 'DOC_OLD', message: 'Format .doc non supporté. Enregistrez en .docx.' });
+      if (text.length < 30) return res.status(422).json({ error: 'DOC_OLD', message: 'Format .doc non supporte. Enregistrez en .docx.' });
     }
     else if (['xlsx','xls'].includes(ext)) {
       const wb = XLSX.read(buffer, { type: 'buffer' });
-      wb.SheetNames.forEach(n => { text += `\n=== ${n} ===\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n]); });
+      wb.SheetNames.forEach(n => { text += '\n=== ' + n + ' ===\n' + XLSX.utils.sheet_to_csv(wb.Sheets[n]); });
     }
-    else return res.status(400).json({ error: 'FORMAT_UNSUPPORTED', message: `Format .${ext} non supporté.` });
-
+    else return res.status(400).json({ error: 'FORMAT_UNSUPPORTED', message: 'Format .' + ext + ' non supporte.' });
     text = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
     if (text.length < 20) return res.status(422).json({ error: 'EMPTY', message: 'Fichier vide. Collez le texte directement.' });
-
-    console.log(`[IMPORT] ✓ ${text.length} chars`);
+    console.log('[IMPORT] ok ' + text.length + ' chars');
     res.json({ success: true, text, metadata: { filename: originalname, chars: text.length } });
   } catch(err) {
     console.error('[IMPORT ERROR]', err.message);
@@ -62,58 +58,47 @@ app.post('/api/analyse', async (req, res) => {
     const { text, tool } = req.body;
     if (!text || text.trim().length < 10) return res.status(400).json({ error: 'Texte trop court' });
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Clé API manquante' });
-
+    if (!apiKey) return res.status(500).json({ error: 'Cle API manquante' });
     const inputText = text.slice(0, 8000);
     const truncated = text.length > 8000;
-    console.log(`[ANALYSE] ${text.length} chars → ${tool}${truncated?' (tronqué)':''}`);
+    console.log('[ANALYSE] ' + text.length + ' chars -> ' + tool + (truncated?' (tronque)':''));
 
-    const system = `Expert collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions en JSON compact.
-
-FORMAT JSON COMPACT OBLIGATOIRE (sans indentation):
-{"title":"titre","questions":[{"id":"q1","num":1,"label":"libelle complet de la question","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":["choix1","choix2"],"group":"groupe ou null","formats":[FORMAT_ARRAY],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}
-
-QUESTION_CLASS et TYPE et FORMATS:
-
-quantitative (age,poids,revenu,score,quantite,mesure...): type=integer ou decimal
-formats=[{"id":"A","name":"Nombre entier","type":"integer","note":"Ex: 25, 150 sans virgule"},{"id":"B","name":"Nombre avec virgule","type":"decimal","note":"Ex: 65,5 kg ou 37,8 degres"},{"id":"C","name":"Valeur sur une echelle","type":"range","note":"Ex: satisfaction de 1 a 10"}]
-
-qualitative_choice (sexe,niveau,statut,oui/non,categories avec options): type=select_one
-IMPORTANT: choices[] doit contenir les vraies options extraites du document
-formats=[{"id":"A","name":"Une seule reponse au choix","type":"select_one","note":"Le repondant coche une seule case"},{"id":"B","name":"Plusieurs reponses possibles","type":"select_multiple","note":"Le repondant peut cocher plusieurs cases"},{"id":"C","name":"Reponse ecrite libre","type":"text","note":"Le repondant ecrit lui-meme"}]
-
-qualitative_open (nom,commentaire,description,adresse,opinion): type=text
-formats=[{"id":"A","name":"Reponse courte","type":"text","note":"Quelques mots ex: nom, profession"},{"id":"B","name":"Reponse longue","type":"text","note":"Plusieurs phrases ex: commentaire"}]
-
-date_time: type=date
-formats=[{"id":"A","name":"Date jour/mois/annee","type":"date","note":"Ex: 15/03/2024"},{"id":"B","name":"Heure","type":"time","note":"Ex: 14h30"},{"id":"C","name":"Date et heure ensemble","type":"datetime","note":"Ex: 15/03/2024 14h30"}]
-
-geopoint: formats=[{"id":"A","name":"Localisation GPS un point precis","type":"geopoint","note":"Capture GPS automatique"}]
-geotrace: formats=[{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Trajet sur carte"}]
-geoshape: formats=[{"id":"A","name":"Delimiter une zone GPS","type":"geoshape","note":"Perimetre sur carte"}]
-media_photo: formats=[{"id":"A","name":"Prendre une photo","type":"image","note":"Photo avec appareil"}]
-media_audio: formats=[{"id":"A","name":"Enregistrer un son","type":"audio","note":"Enregistrement audio"}]
-media_video: formats=[{"id":"A","name":"Enregistrer une video","type":"video","note":"Enregistrement video"}]
-media_file: formats=[{"id":"A","name":"Joindre un fichier","type":"file","note":"PDF, Excel ou autre"}]
-barcode: formats=[{"id":"A","name":"Scanner un code-barres","type":"barcode","note":"QR code ou code-barres"}]
-acknowledge: formats=[{"id":"A","name":"Case a cocher pour confirmer","type":"acknowledge","note":"Ex: J accepte les conditions"}]
-ranking: formats=[{"id":"A","name":"Classer par ordre de preference","type":"rank","note":"Du plus au moins important"}]
-scale: formats=[{"id":"A","name":"Valeur sur une echelle","type":"range","note":"Ex: douleur de 0 a 10"}]
-calculate: formats=[{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calcul a partir d autres reponses"}]
-note: formats=[{"id":"A","name":"Message information","type":"note","note":"Texte affiche sans saisie"}]
-
-SUGGESTIONS (seulement si vraiment detecte dans la logique du questionnaire):
-Format: {"type":"skip_logic","label":"libelle court","description":"explication claire sans jargon","value":"formule XLSForm relevant","confidence":"high|medium|low"}
-{"type":"calculate","label":"libelle court","description":"explication","value":"formule XLSForm calculation","confidence":"high|medium|low"}
-{"type":"constraint","label":"libelle court","description":"explication","value":"formule XLSForm constraint","confidence":"high|medium|low"}
-
-REGLES IMPORTANTES:
-- required=true par defaut pour toutes les questions
-- Extrais TOUTES les questions sans exception
-- Pour qualitative_choice: extrais les vraies options dans choices[]
-- suggested_format_idx = index du format le plus adapte (0, 1 ou 2)
-- JSON compact sans indentation obligatoire
-- Outil cible: ${tool}`;
+    const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions.\n\n' +
+'REGLES EXTRACTION EXHAUSTIVE:\n' +
+'1. Extrais TOUTES les questions: numerotees, sans numero (date/lieu en entete), sous-questions implicites, variables cachees dans les modalites.\n' +
+'2. CHAMP AUTRES PRECISEZ: Quand une modalite contient "Autres", "Autre", "Precisez" ou "a preciser":\n' +
+'   - Garde "Autres" dans choices[] de la question principale\n' +
+'   - Cree AUTOMATIQUEMENT une question de saisie libre juste apres (question_class=qualitative_open, required=false)\n' +
+'   - Label: "Precisez:" ou "Si autre, precisez:"\n' +
+'   - Ajoute suggestion skip_logic sur cette question pointant vers la question parente\n' +
+'3. SOUS-QUESTIONS: Si "si oui, repondez a Q..." cree chaque sous-question avec skip_logic.\n' +
+'4. SAUTS IMPLICITES: Detecte les sauts meme non ecrits (ex: "Si Oui, lesquels?" => conditionnel a la question precedente).\n' +
+'5. RAPPORT DE COHERENCE: Champ "coherence_report" avec: questions manquantes dans numerotation, sauts detectes, incoherences logiques.\n\n' +
+'FORMAT JSON COMPACT (sans indentation):\n' +
+'{"title":"titre","coherence_report":["obs1","obs2"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"group":"groupe","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
+'FORMATS PAR CLASSE:\n' +
+'quantitative: [{"id":"A","name":"Nombre entier","type":"integer","note":"Ex: 25"},{"id":"B","name":"Nombre avec virgule","type":"decimal","note":"Ex: 65,5"},{"id":"C","name":"Valeur sur une echelle","type":"range","note":"Ex: 1 a 10"}]\n' +
+'qualitative_choice: [{"id":"A","name":"Une seule reponse au choix","type":"select_one","note":"Une case"},{"id":"B","name":"Plusieurs reponses possibles","type":"select_multiple","note":"Plusieurs cases"},{"id":"C","name":"Reponse ecrite libre","type":"text","note":"Libre"}]\n' +
+'Pour mention "Plusieurs reponses" ou "Cochez toutes": suggested_format_idx=1\n' +
+'qualitative_open: [{"id":"A","name":"Reponse courte","type":"text","note":"Quelques mots"},{"id":"B","name":"Reponse longue","type":"text","note":"Plusieurs phrases"}]\n' +
+'date_time: [{"id":"A","name":"Date","type":"date","note":"jj/mm/aaaa"},{"id":"B","name":"Heure","type":"time","note":"hh:mm"},{"id":"C","name":"Date et heure","type":"datetime","note":"jj/mm/aaaa hh:mm"}]\n' +
+'geopoint: [{"id":"A","name":"Localisation GPS","type":"geopoint","note":"GPS auto"}]\n' +
+'geotrace: [{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Trajet"}]\n' +
+'geoshape: [{"id":"A","name":"Delimiter une zone GPS","type":"geoshape","note":"Zone"}]\n' +
+'media_photo: [{"id":"A","name":"Prendre une photo","type":"image","note":"Photo"}]\n' +
+'media_audio: [{"id":"A","name":"Enregistrer un son","type":"audio","note":"Audio"}]\n' +
+'media_video: [{"id":"A","name":"Enregistrer une video","type":"video","note":"Video"}]\n' +
+'media_file: [{"id":"A","name":"Joindre un fichier","type":"file","note":"Fichier"}]\n' +
+'barcode: [{"id":"A","name":"Scanner un code-barres","type":"barcode","note":"QR/barcode"}]\n' +
+'acknowledge: [{"id":"A","name":"Case a cocher pour confirmer","type":"acknowledge","note":"Confirmation"}]\n' +
+'ranking: [{"id":"A","name":"Classer par ordre de preference","type":"rank","note":"Ordre"}]\n' +
+'scale: [{"id":"A","name":"Valeur sur une echelle","type":"range","note":"Curseur"}]\n' +
+'calculate: [{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calcul"}]\n' +
+'note: [{"id":"A","name":"Message information","type":"note","note":"Sans saisie"}]\n\n' +
+'SUGGESTIONS FORMAT: {"type":"skip_logic","label":"court","description":"explication claire","value":"formule XLSForm","confidence":"high|medium|low"}\n' +
+'{"type":"constraint","label":"court","description":"explication","value":"formule XLSForm","confidence":"high|medium|low"}\n' +
+'{"type":"calculate","label":"court","description":"explication","value":"formule XLSForm","confidence":"high|medium|low"}\n\n' +
+'REGLES FINALES: required=true par defaut. Extrais TOUTES questions. choices[] pour qualitative_choice. JSON compact. Outil: ' + tool;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -122,7 +107,7 @@ REGLES IMPORTANTES:
         model: 'claude-sonnet-4-5',
         max_tokens: 4096,
         system,
-        messages: [{ role: 'user', content: `Extrais toutes les questions de ce questionnaire:\n\n${inputText}` }]
+        messages: [{ role: 'user', content: 'Extrais toutes les questions de ce questionnaire:\n\n' + inputText }]
       })
     });
 
@@ -133,7 +118,7 @@ REGLES IMPORTANTES:
     }
 
     const data = await response.json();
-    const rawText = data.content?.[0]?.text || '{}';
+    const rawText = data.content && data.content[0] ? data.content[0].text : '{}';
 
     let form;
     try {
@@ -161,12 +146,11 @@ REGLES IMPORTANTES:
       return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question detectee.' });
     }
 
-    console.log(`[ANALYSE] ✓ ${form.questions.length} questions`);
+    console.log('[ANALYSE] ok ' + form.questions.length + ' questions');
     res.json({
       success: true, form, truncated,
-      warning: truncated ? `Questionnaire long (${text.length} caracteres). Seuls les ${inputText.length} premiers caracteres ont ete analyses. Verifiez que toutes vos questions sont presentes.` : null
+      warning: truncated ? 'Questionnaire long (' + text.length + ' car). Seuls les ' + inputText.length + ' premiers caracteres ont ete analyses.' : null
     });
-
   } catch(err) {
     console.error('[ANALYSE ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
@@ -180,20 +164,18 @@ app.post('/api/correct', async (req, res) => {
     if (!form || !instructions) return res.status(400).json({ error: 'Donnees manquantes' });
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Cle API manquante' });
-
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5', max_tokens: 4096,
         system: 'Expert collecte de donnees. Applique exactement les corrections au formulaire JSON. Retourne JSON corrige UNIQUEMENT sans markdown.',
-        messages: [{ role: 'user', content: `Formulaire:\n${JSON.stringify(form)}\n\nCorrections:\n${instructions}` }]
+        messages: [{ role: 'user', content: 'Formulaire:\n' + JSON.stringify(form) + '\n\nCorrections:\n' + instructions }]
       })
     });
-
     if (!response.ok) return res.status(502).json({ error: 'CLAUDE_ERROR' });
     const data = await response.json();
-    let raw = data.content?.[0]?.text||'{}';
+    let raw = data.content && data.content[0] ? data.content[0].text : '{}';
     raw = raw.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
     const m = raw.match(/\{[\s\S]*/);
     const corrected = JSON.parse(m ? m[0] : '{}');
@@ -209,25 +191,23 @@ app.post('/api/deploy/kobo', async (req, res) => {
     const { form, credentials } = req.body;
     const { username, password, server = 'https://kf.kobotoolbox.org' } = credentials;
     if (!form || !username || !password) return res.status(400).json({ error: 'Donnees manquantes' });
-
-    console.log(`[DEPLOY] KoboToolbox → ${server}`);
-
-    const tokenRes = await fetch(`${server}/token/?format=json`, {
-      headers: { 'Authorization': 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64') }
+    console.log('[DEPLOY] KoboToolbox -> ' + server);
+    const tokenRes = await fetch(server + '/token/?format=json', {
+      headers: { 'Authorization': 'Basic ' + Buffer.from(username + ':' + password).toString('base64') }
     });
     if (!tokenRes.ok) return res.status(401).json({ error: 'AUTH_ERROR', message: 'Identifiants incorrects.' });
-    const { token } = await tokenRes.json();
+    const tokenData = await tokenRes.json();
+    const token = tokenData.token;
     const auth = { 'Authorization': 'Token ' + token, 'Content-Type': 'application/json' };
-
-    const assetRes = await fetch(`${server}/api/v2/assets/?format=json`, {
+    const assetRes = await fetch(server + '/api/v2/assets/?format=json', {
       method: 'POST', headers: auth,
       body: JSON.stringify({ name: form.title || 'Formulaire R2', asset_type: 'survey' })
     });
     if (!assetRes.ok) return res.status(502).json({ error: 'ASSET_ERROR', message: 'Erreur creation formulaire.' });
-    const { uid } = await assetRes.json();
-
+    const assetData = await assetRes.json();
+    const uid = assetData.uid;
     const koboContent = buildKoboContent(form);
-    const patchRes = await fetch(`${server}/api/v2/assets/${uid}/?format=json`, {
+    const patchRes = await fetch(server + '/api/v2/assets/' + uid + '/?format=json', {
       method: 'PATCH', headers: auth,
       body: JSON.stringify({ name: form.title || 'Formulaire R2', content: koboContent })
     });
@@ -236,13 +216,12 @@ app.post('/api/deploy/kobo', async (req, res) => {
       console.error('[PATCH ERROR]', e);
       return res.status(502).json({ error: 'PATCH_ERROR', message: 'Erreur import questionnaire.' });
     }
-
-    await fetch(`${server}/api/v2/assets/${uid}/deployment/?format=json`, {
+    await fetch(server + '/api/v2/assets/' + uid + '/deployment/?format=json', {
       method: 'POST', headers: auth, body: JSON.stringify({ active: true })
     });
-
-    console.log(`[DEPLOY] ✓ ${uid} — ${form.questions?.length} questions`);
-    res.json({ success: true, uid, url: `${server}/#/forms/${uid}/summary`, questions: form.questions?.length || 0 });
+    const qCount = form.questions ? form.questions.length : 0;
+    console.log('[DEPLOY] ok ' + uid + ' - ' + qCount + ' questions');
+    res.json({ success: true, uid, url: server + '/#/forms/' + uid + '/summary', questions: qCount });
   } catch(err) {
     console.error('[DEPLOY ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
@@ -254,99 +233,53 @@ function buildKoboContent(form) {
   const survey = [];
   const choices = [];
   const seen = new Set();
-
-  // Grouper les questions
   const groups = {};
-  (form.questions || []).forEach(q => {
+  (form.questions || []).forEach(function(q) {
     const g = q.group || 'general';
     if (!groups[g]) groups[g] = [];
     groups[g].push(q);
   });
-
-  Object.entries(groups).forEach(([gname, qs]) => {
+  Object.keys(groups).forEach(function(gname) {
+    const qs = groups[gname];
     const gId = gname.replace(/\s+/g,'_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'').slice(0,32);
-
-    if (gname !== 'general') {
-      survey.push({ type: 'begin_group', name: gId, label: gname });
-    }
-
-    qs.forEach(q => {
-      // Determine le type final selon le choix de l'utilisateur
+    if (gname !== 'general') survey.push({ type: 'begin_group', name: gId, label: gname });
+    qs.forEach(function(q) {
       const fmtIdx = q.validatedFormatIdx !== undefined ? q.validatedFormatIdx : (q.suggested_format_idx || 0);
-      const selectedFmt = q.formats?.[fmtIdx];
-      const t = q.selectedType || selectedFmt?.type || q.type || 'text';
-      const name = (q.id || ('q'+q.num)).replace(/[^a-zA-Z0-9_]/g,'_');
-
-      const row = {
-        type: t,
-        name,
-        label: q.label || '',
-        required: q.required !== false ? 'yes' : 'no',
-        hint: q.hint || ''
-      };
-
-      // Logique de saut
+      const selectedFmt = q.formats && q.formats[fmtIdx] ? q.formats[fmtIdx] : null;
+      const t = q.selectedType || (selectedFmt ? selectedFmt.type : null) || q.type || 'text';
+      const name = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g,'_');
+      const row = { type: t, name: name, label: q.label || '', required: q.required !== false ? 'yes' : 'no', hint: q.hint || '' };
       if (q.relevant && q.relevant.trim()) row.relevant = q.relevant.trim();
-
-      // Calcul
-      if (t === 'calculate' && q.calculation) {
-        row.calculation = q.calculation;
-        delete row.required;
-      }
-
-      // Contrainte (min/max + chiffres)
+      if (t === 'calculate' && q.calculation) { row.calculation = q.calculation; delete row.required; }
       const constraints = [];
-      if (q.numMin !== '' && q.numMin !== undefined && q.numMin !== null) constraints.push(`. >= ${q.numMin}`);
-      if (q.numMax !== '' && q.numMax !== undefined && q.numMax !== null) constraints.push(`. <= ${q.numMax}`);
-      if (q.numDigitsBefore) constraints.push(`string-length(substring-before(string(.), '.')) <= ${q.numDigitsBefore}`);
-      if (q.numDigitsAfter) constraints.push(`string-length(substring-after(string(.), '.')) <= ${q.numDigitsAfter}`);
+      if (q.numMin !== '' && q.numMin !== undefined && q.numMin !== null) constraints.push('. >= ' + q.numMin);
+      if (q.numMax !== '' && q.numMax !== undefined && q.numMax !== null) constraints.push('. <= ' + q.numMax);
+      if (q.numDigitsBefore) constraints.push('string-length(substring-before(string(.), \'.\')) <= ' + q.numDigitsBefore);
+      if (q.numDigitsAfter) constraints.push('string-length(substring-after(string(.), \'.\')) <= ' + q.numDigitsAfter);
       if (q.constraint && q.constraint.trim()) constraints.push(q.constraint.trim());
-      if (constraints.length > 0) {
-        row.constraint = constraints.join(' and ');
-        row.constraint_message = 'Valeur hors des limites acceptees';
-      }
-
-      // Range
-      if (t === 'range') {
-        row.parameters = `start=${q.numMin||1} end=${q.numMax||10}`;
-        delete row.required;
-      }
-
-      // Note / calculate — pas de required
-      if (['note','calculate'].includes(t)) delete row.required;
-
-      // Choix
-      if (['select_one','select_multiple','rank'].includes(t)) {
+      if (constraints.length > 0) { row.constraint = constraints.join(' and '); row.constraint_message = 'Valeur hors limites'; }
+      if (t === 'range') { row.parameters = 'start=' + (q.numMin||1) + ' end=' + (q.numMax||10); delete row.required; }
+      if (t === 'note' || t === 'calculate') delete row.required;
+      if (t === 'select_one' || t === 'select_multiple' || t === 'rank') {
         const listName = 'list_' + name;
         row.type = t + ' ' + listName;
         if (!seen.has(listName)) {
           seen.add(listName);
-          (q.choices || []).forEach((c, i) => {
+          (q.choices || []).forEach(function(c, i) {
             const label = typeof c === 'string' ? c : (c.label || String(c));
             const val = label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'_').replace(/__+/g,'_').replace(/^_|_$/g,'').slice(0,30) || ('c'+(i+1));
-            choices.push({ list_name: listName, name: val, label });
+            choices.push({ list_name: listName, name: val, label: label });
           });
         }
       }
-
       survey.push(row);
     });
-
-    if (gname !== 'general') {
-      survey.push({ type: 'end_group', name: gId });
-    }
+    if (gname !== 'general') survey.push({ type: 'end_group', name: gId });
   });
-
-  return {
-    survey, choices,
-    settings: [{
-      form_title: form.title || 'Formulaire',
-      form_id: (form.title||'formulaire').replace(/\s+/g,'_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'').slice(0,32),
-      version: '1'
-    }]
-  };
+  const formId = (form.title||'formulaire').replace(/\s+/g,'_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'').slice(0,32);
+  return { survey: survey, choices: choices, settings: [{ form_title: form.title || 'Formulaire', form_id: formId, version: '1' }] };
 }
 
-app.listen(PORT, () => {
-  console.log(`\n╔══════════════════════════════════╗\n║   R2 Forms — Backend v3.0        ║\n║   Port : ${PORT}                     ║\n╚══════════════════════════════════╝\n`);
+app.listen(PORT, function() {
+  console.log('\n╔══════════════════════════════════╗\n║   R2 Forms Backend v3.1          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
 });
