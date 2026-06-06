@@ -150,123 +150,110 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
 // ============ ROUTE: ANALYSE CLAUDE ============
 // Chunking : découpe le texte en morceaux et fusionne les résultats
 
-const CHUNK_SIZE = 5000;    // caractères par chunk
-const CHUNK_OVERLAP = 200;  // overlap pour ne pas couper une question en deux
+const CHUNK_SIZE = 3000;    // caractères par chunk (réduit pour économiser RAM)
+const CHUNK_OVERLAP = 100;  // overlap réduit
 
 async function analyseChunk(apiKey, chunkText, tool, chunkNum, totalChunks, previousIds) {
   const isFirst = chunkNum === 1;
   const isLast = chunkNum === totalChunks;
-  
-  const contextNote = totalChunks > 1 
-    ? `\nCeci est la partie ${chunkNum} sur ${totalChunks} du questionnaire.${isFirst ? ' Commence depuis le début.' : ' Continue l\'extraction — ne répète pas les questions déjà extraites.'}${isLast ? ' C\'est la dernière partie.' : ''}`
+
+  const contextNote = totalChunks > 1
+    ? `\nPartie ${chunkNum}/${totalChunks}.${isFirst ? ' Commence depuis le debut.' : ' Ne repete pas les questions deja extraites.'}${isLast ? ' Derniere partie.' : ''}`
     : '';
 
   const previousNote = previousIds.length > 0
-    ? `\nQuestions déjà extraites (IDs à ne pas répéter): ${previousIds.join(', ')}`
+    ? `\nIDs deja extraits (ne pas repeter): ${previousIds.slice(-10).join(', ')}`
     : '';
 
-  const system = `Tu es un expert en collecte de données terrain pour les ONG, universités et entreprises en Afrique de l'Ouest.
-Tu analyses des questionnaires et extrais leur structure COMPLÈTE avec toute la logique interne.
+  const system = `Expert collecte de donnees terrain. Analyse questionnaire et extrais questions en JSON compact.
 
-Réponds UNIQUEMENT en JSON valide compact (sans indentation, sans espaces inutiles), sans markdown ni texte autour.
+CLASSIFICATION question_class:
+quantitative(numerique mesurable: age,poids,revenu,score...), qualitative_choice(choix parmi options), qualitative_open(reponse libre), date_time, geopoint, geotrace, geoshape, media_photo, media_audio, media_video, media_file, barcode, acknowledge, ranking, scale, calculate, note
 
-=== CLASSIFICATION DES QUESTIONS ===
-Pour chaque question, détermine sa classe selon sa nature réelle :
-- quantitative : variable numérique mesurable (âge, poids, taille, revenu, score, durée, quantité, nombre de...). JAMAIS de choix pour ces questions.
-- qualitative_choice : réponse choisie parmi des options définies (sexe, niveau d'instruction, statut, oui/non, catégories...)
-- qualitative_open : réponse libre sans options (nom, commentaire, description, adresse, opinion...)
-- date_time : question de date, heure ou date+heure
-- geopoint : localisation GPS précise (un point)
-- geotrace : trajet ou chemin GPS
-- geoshape : zone ou périmètre GPS
-- media_photo : question demandant une photo
-- media_audio : question demandant un enregistrement audio
-- media_video : question demandant une vidéo
-- media_file : question demandant un fichier joint
-- barcode : scan de code-barres ou QR code
-- acknowledge : question d'accord ou de confirmation
-- ranking : classement par ordre de préférence
-- scale : échelle ou curseur numérique
-- calculate : variable calculée automatiquement
-- note : information sans réponse
+FORMAT SORTIE JSON COMPACT (obligatoire, sans indentation):
+{"title":"titre","summary":"resume","questions":[{"id":"q1","num":1,"label":"libelle","question_class":"quantitative","type":"integer","required":true,"hint":"","choices":[],"group":"groupe","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}
 
-=== FORMAT DE SORTIE (JSON COMPACT OBLIGATOIRE) ===
-{"title":"titre","summary":"résumé","questions":[{"id":"q1","num":1,"label":"libellé","question_class":"quantitative","type":"integer","required":true,"hint":"","choices":[],"group":"groupe ou null","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}
+FORMATS PAR CLASSE:
+quantitative:[{"id":"A","name":"Nombre entier","type":"integer","note":"Ex: 25"},{"id":"B","name":"Nombre avec virgule","type":"decimal","note":"Ex: 65,5"},{"id":"C","name":"Valeur sur une echelle","type":"range","note":"Ex: 1 a 10"}]
+qualitative_choice:[{"id":"A","name":"Une seule reponse au choix","type":"select_one","note":"Une case"},{"id":"B","name":"Plusieurs reponses possibles","type":"select_multiple","note":"Plusieurs cases"},{"id":"C","name":"Reponse ecrite libre","type":"text","note":"Libre"}]
+qualitative_open:[{"id":"A","name":"Reponse courte","type":"text","note":"Quelques mots"},{"id":"B","name":"Reponse longue","type":"text","note":"Plusieurs phrases"}]
+date_time:[{"id":"A","name":"Date jour/mois/annee","type":"date","note":"15/03/2024"},{"id":"B","name":"Heure","type":"time","note":"14h30"},{"id":"C","name":"Date et heure","type":"datetime","note":"15/03/2024 14h30"}]
+geopoint:[{"id":"A","name":"Localisation GPS un point","type":"geopoint","note":"GPS auto"}]
+geotrace:[{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Trajet carte"}]
+geoshape:[{"id":"A","name":"Delimiter une zone GPS","type":"geoshape","note":"Perimetre carte"}]
+media_photo:[{"id":"A","name":"Prendre une photo","type":"image","note":"Photo"}]
+media_audio:[{"id":"A","name":"Enregistrer un son","type":"audio","note":"Audio"}]
+media_video:[{"id":"A","name":"Enregistrer une video","type":"video","note":"Video"}]
+media_file:[{"id":"A","name":"Joindre un fichier","type":"file","note":"Fichier"}]
+barcode:[{"id":"A","name":"Scanner un code-barres","type":"barcode","note":"QR/barcode"}]
+acknowledge:[{"id":"A","name":"Case a cocher pour confirmer","type":"acknowledge","note":"Une case"}]
+ranking:[{"id":"A","name":"Classer par ordre de preference","type":"rank","note":"Ordre"}]
+scale:[{"id":"A","name":"Valeur sur une echelle","type":"range","note":"Curseur"}]
+calculate:[{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calcul auto"}]
+note:[{"id":"A","name":"Message information","type":"note","note":"Sans saisie"}]
 
-=== FORMATS SELON LA CLASSE ===
-quantitative: formats=[{"id":"A","name":"Nombre entier","type":"integer","note":"Ex: 25, 150 — sans virgule"},{"id":"B","name":"Nombre avec virgule","type":"decimal","note":"Ex: 65,5 kg, 37,8°C"},{"id":"C","name":"Valeur sur une echelle","type":"range","note":"Ex: satisfaction de 1 a 10"}]
-qualitative_choice: formats=[{"id":"A","name":"Une seule reponse au choix","type":"select_one","note":"Le repondant ne coche qu'une case"},{"id":"B","name":"Plusieurs reponses possibles","type":"select_multiple","note":"Le repondant peut cocher plusieurs cases"},{"id":"C","name":"Reponse ecrite libre","type":"text","note":"Le repondant ecrit lui-meme sa reponse"}]
-qualitative_open: formats=[{"id":"A","name":"Reponse courte","type":"text","note":"Quelques mots"},{"id":"B","name":"Reponse longue","type":"text","note":"Plusieurs phrases"}]
-date_time: formats=[{"id":"A","name":"Date (jour/mois/annee)","type":"date","note":"Ex: 15/03/2024"},{"id":"B","name":"Heure","type":"time","note":"Ex: 14h30"},{"id":"C","name":"Date et heure","type":"datetime","note":"Ex: 15/03/2024 a 14h30"}]
-geopoint: formats=[{"id":"A","name":"Localisation GPS (un point precis)","type":"geopoint","note":"Capture automatiquement la position GPS"}]
-geotrace: formats=[{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Enregistre un trajet sur la carte"}]
-geoshape: formats=[{"id":"A","name":"Delimiter une zone GPS","type":"geoshape","note":"Dessine un perimetre sur la carte"}]
-media_photo: formats=[{"id":"A","name":"Prendre une photo","type":"image","note":"Photo avec l'appareil photo"}]
-media_audio: formats=[{"id":"A","name":"Enregistrer un son","type":"audio","note":"Enregistrement audio"}]
-media_video: formats=[{"id":"A","name":"Enregistrer une video","type":"video","note":"Enregistrement video"}]
-media_file: formats=[{"id":"A","name":"Joindre un fichier","type":"file","note":"Document PDF, Excel ou autre"}]
-barcode: formats=[{"id":"A","name":"Scanner un code-barres","type":"barcode","note":"Scan QR code ou code-barres"}]
-acknowledge: formats=[{"id":"A","name":"Case a cocher pour confirmer","type":"acknowledge","note":"Une seule case a cocher"}]
-ranking: formats=[{"id":"A","name":"Classer par ordre de preference","type":"rank","note":"Du plus important au moins important"}]
-scale: formats=[{"id":"A","name":"Valeur sur une echelle","type":"range","note":"Ex: satisfaction de 1 a 5"}]
-calculate: formats=[{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calculee a partir des autres reponses"}]
-note: formats=[{"id":"A","name":"Message d'information","type":"note","note":"Affiche un texte sans demander de reponse"}]
+SUGGESTIONS (seulement si pertinent):
+{"type":"skip_logic|calculate|constraint","label":"court","description":"clair","value":"formule XLSForm","confidence":"high|medium|low"}
+skip_logic value ex: "\${id} = 'oui'" | calculate value ex: "\${q1} + \${q2}" | constraint value ex: ". >= 0 and . <= 120"
 
-=== SUGGESTIONS ===
-Pour chaque question, ajoute les suggestions pertinentes detectees dans la logique du questionnaire:
-Format: {"type":"skip_logic|calculate|constraint","label":"libelle court","description":"explication claire","value":"formule XLSForm","confidence":"high|medium|low"}
-- skip_logic: condition d'affichage. value ex: "\${id_q} = 'oui'" ou "selected(\${id_q}, 'valeur')"
-- calculate: calcul auto. value ex: "\${q_poids} div (\${q_taille} * \${q_taille}) * 10000"
-- constraint: contrainte logique. value ex: ". >= 0 and . <= 150"
+REGLES: required:true par defaut. Extrais TOUTES questions. choices[] pour qualitative_choice. JSON compact obligatoire. Outil: ${tool}${contextNote}${previousNote}`;
 
-=== REGLES ===
-- Toutes questions required:true par defaut sauf si explicitement facultatif
-- Respecte l'ordre original des questions
-- Regroupe par thematique dans "group"
-- Extrais TOUTES les questions et sous-questions sans exception
-- Pour qualitative_choice: extrais les vraies modalites dans choices[]
-- Numerote les questions en continu (num) meme sur plusieurs parties
-- Outil cible: ${tool}${contextNote}${previousNote}`;
 
+  // Streaming pour économiser la mémoire
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01'
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'messages-2023-06-01'
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-5',
-      max_tokens: 8000,
+      max_tokens: 4096,
+      stream: false, // pas de streaming HTTP mais on optimise la mémoire autrement
       system,
-      messages: [{ role: 'user', content: `Extrais toutes les questions de cette partie du questionnaire:\n\n${chunkText}` }]
+      messages: [{ role: 'user', content: `Extrais les questions de cette partie:\n\n${chunkText}` }]
     })
   });
 
   if (!response.ok) {
-    const errData = await response.json();
-    throw new Error(`Claude API error: ${JSON.stringify(errData)}`);
+    let errMsg = 'Claude API error';
+    try {
+      const errData = await response.json();
+      errMsg = errData.error?.message || JSON.stringify(errData);
+    } catch(e) {}
+    throw new Error(errMsg);
   }
 
+  // Lire la réponse en chunks pour économiser la mémoire
   const data = await response.json();
   const rawText = data.content?.[0]?.text || '{}';
+  
+  // Libérer la référence data immédiatement
+  data.content = null;
 
-  // Parse JSON
-  let cleanText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  const jsonMatch = cleanText.match(/\{[\s\S]*/);
-  let jsonStr = jsonMatch ? jsonMatch[0] : cleanText;
+  // Nettoyer et parser
+  let jsonStr = rawText
+    .replace(/```json\n?/g, '')
+    .replace(/```\n?/g, '')
+    .trim();
+  
+  const jsonStart = jsonStr.indexOf('{');
+  if (jsonStart > 0) jsonStr = jsonStr.slice(jsonStart);
 
   try {
-    return JSON.parse(jsonStr);
+    const result = JSON.parse(jsonStr);
+    return result;
   } catch(e) {
     // Réparer JSON tronqué
     const lastComplete = jsonStr.lastIndexOf('},');
-    if (lastComplete > 0) jsonStr = jsonStr.slice(0, lastComplete + 1);
+    if (lastComplete > 500) jsonStr = jsonStr.slice(0, lastComplete + 1);
     jsonStr = jsonStr.replace(/,\s*$/, '');
     const opens = (jsonStr.match(/\[/g)||[]).length - (jsonStr.match(/\]/g)||[]).length;
     const openb = (jsonStr.match(/\{/g)||[]).length - (jsonStr.match(/\}/g)||[]).length;
-    for(let i = 0; i < Math.max(0,opens); i++) jsonStr += ']';
-    for(let i = 0; i < Math.max(0,openb); i++) jsonStr += '}';
+    for(let i = 0; i < Math.max(0, opens); i++) jsonStr += ']';
+    for(let i = 0; i < Math.max(0, openb); i++) jsonStr += '}';
     return JSON.parse(jsonStr);
   }
 }
