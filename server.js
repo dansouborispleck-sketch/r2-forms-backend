@@ -103,9 +103,9 @@ calculate: formats=[{"id":"A","name":"Valeur calculee automatiquement","type":"c
 note: formats=[{"id":"A","name":"Message information","type":"note","note":"Texte affiche sans saisie"}]
 
 SUGGESTIONS (seulement si vraiment detecte dans la logique du questionnaire):
-Format: {"type":"skip_logic","label":"court","description":"explication claire pour non-technicien","value":"formule XLSForm ex: \\${id_q} = valeur","confidence":"high|medium|low"}
-{"type":"calculate","label":"court","description":"explication","value":"formule XLSForm ex: \\${q1} + \\${q2}","confidence":"high|medium|low"}
-{"type":"constraint","label":"court","description":"explication","value":"formule ex: . >= 0 and . <= 120","confidence":"high|medium|low"}
+Format: {"type":"skip_logic","label":"libelle court","description":"explication claire sans jargon","value":"formule XLSForm relevant","confidence":"high|medium|low"}
+{"type":"calculate","label":"libelle court","description":"explication","value":"formule XLSForm calculation","confidence":"high|medium|low"}
+{"type":"constraint","label":"libelle court","description":"explication","value":"formule XLSForm constraint","confidence":"high|medium|low"}
 
 REGLES IMPORTANTES:
 - required=true par defaut pour toutes les questions
