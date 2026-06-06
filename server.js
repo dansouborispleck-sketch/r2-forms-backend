@@ -203,11 +203,11 @@ RÈGLES IMPORTANTES:
    Format d'une suggestion: {"type":"...","label":"...","description":"...","value":"...","confidence":"high|medium|low"}
    
    Types disponibles:
-   - skip_logic: saut conditionnel. La condition s'applique UNIQUEMENT sur la question qui doit s'afficher conditionnellement (pas sur la question source). value = formule XLSForm relevant ex: "${q1} = 'oui'" ou "${q1} != ''" ou "selected(${q3}, 'feminin')"
-   - calculate: calcul automatique. Toutes formes possibles: somme, différence, produit, quotient, pourcentage, moyenne, etc. value = formule XLSForm ex: "${q5} div (${q6} * ${q6}) * 10000" ou "${q3} + ${q4}" ou "${q5} * 100 div ${q6}"
-   - required_override: cette question devrait être facultative malgré le défaut obligatoire
+   - skip_logic: saut conditionnel. La condition s'applique UNIQUEMENT sur la question qui doit s'afficher conditionnellement (pas sur la question source). value = formule XLSForm relevant ex: "\${id_question} = 'oui'" ou "\${id_question} != ''" ou "selected(\${id_question}, 'valeur')"
+   - calculate: calcul automatique. Toutes formes possibles: somme, difference, produit, quotient, pourcentage, moyenne, etc. value = formule XLSForm ex: "\${q5} div (\${q6} * \${q6}) * 10000" ou "\${q3} + \${q4}" ou "\${q5} * 100 div \${q6}"
+   - required_override: cette question devrait etre facultative malgre le defaut obligatoire
 
-4. Pour skip_logic: la formule XLSForm doit référencer l'ID exact de la question source (ex: ${q2}). Utilise selected() pour les questions à choix multiple.
+4. Pour skip_logic: la formule XLSForm doit referencer l'ID exact de la question source (ex: \${id_question}). Utilise selected() pour les questions a choix multiple.
 
 5. Pour calculate: le type de la question devient automatiquement "calculate", la formule va dans le champ calculation XLSForm.
 
