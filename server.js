@@ -666,3 +666,35 @@ app.post('/api/deploy/google', async (req, res) => {
 });
 
 
+
+// ============ CORRECTION ============
+app.post('/api/correct', async (req, res) => {
+  try {
+    const { form, instructions } = req.body;
+    if (!form || !instructions) return res.status(400).json({ error: 'Donnees manquantes' });
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'Cle API manquante' });
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5', max_tokens: 4096,
+        system: 'Expert collecte de donnees. Applique exactement les corrections au formulaire JSON. Retourne JSON corrige UNIQUEMENT sans markdown.',
+        messages: [{ role: 'user', content: 'Formulaire:\n' + JSON.stringify(form) + '\n\nCorrections:\n' + instructions }]
+      })
+    });
+    if (!response.ok) return res.status(502).json({ error: 'CLAUDE_ERROR' });
+    const data = await response.json();
+    let raw = data.content && data.content[0] ? data.content[0].text : '{}';
+    raw = raw.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+    const m = raw.match(/\{[\s\S]*/);
+    const corrected = JSON.parse(m ? m[0] : '{}');
+    res.json({ success: true, form: corrected });
+  } catch(err) {
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
+});
+
+app.listen(PORT, function() {
+  console.log('\n╔══════════════════════════════════╗\n║   R2 Forms Backend v3.2          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
+});
