@@ -406,48 +406,63 @@ app.post('/api/deploy/google', async (req, res) => {
 
     const createData = await createRes.json();
     const formId = createData.formId;
-    const formUrl = createData.responderUri || ('https://docs.google.com/forms/d/' + formId + '/viewform');
+    // URL d'edition pour que le client puisse verifier le formulaire
+    const formUrl = 'https://docs.google.com/forms/d/' + formId + '/edit';
 
     // 2. Ajouter les questions par batch
-    const requests = (form.questions || []).map(function(q, i) {
-      const t = q.selectedType || q.type || 'text';
-      let item = { title: q.label || '', required: q.required !== false };
+    const questions = form.questions || [];
+    const requests = [];
 
-      if (t === 'select_one') {
-        item.questionItem = { question: { required: q.required !== false, choiceQuestion: {
-          type: 'RADIO',
-          options: (q.choices || []).map(function(c) { return { value: typeof c === 'string' ? c : c.label }; }),
-          shuffle: false
-        }}};
-      } else if (t === 'select_multiple') {
-        item.questionItem = { question: { required: q.required !== false, choiceQuestion: {
-          type: 'CHECKBOX',
-          options: (q.choices || []).map(function(c) { return { value: typeof c === 'string' ? c : c.label }; }),
-          shuffle: false
-        }}};
-      } else if (t === 'integer' || t === 'decimal') {
-        item.questionItem = { question: { required: q.required !== false, textQuestion: { paragraph: false } } };
+    questions.forEach(function(q, i) {
+      const t = q.selectedType || q.type || 'text';
+      const required = q.required !== false;
+      const choices = (q.choices || []).map(function(c) {
+        const label = typeof c === 'string' ? c : (c.label || String(c));
+        return { value: label };
+      });
+
+      let questionItem;
+
+      if ((t === 'select_one') && choices.length > 0) {
+        questionItem = { question: { required, choiceQuestion: { type: 'RADIO', options: choices, shuffle: false } } };
+      } else if ((t === 'select_multiple') && choices.length > 0) {
+        questionItem = { question: { required, choiceQuestion: { type: 'CHECKBOX', options: choices, shuffle: false } } };
       } else if (t === 'date') {
-        item.questionItem = { question: { required: q.required !== false, dateQuestion: { includeTime: false, includeYear: true } } };
-      } else if (t === 'time') {
-        item.questionItem = { question: { required: q.required !== false, timeQuestion: { duration: false } } };
+        questionItem = { question: { required, dateQuestion: { includeTime: false, includeYear: true } } };
+      } else if (t === 'time' || t === 'datetime') {
+        questionItem = { question: { required, timeQuestion: { duration: false } } };
+      } else if (t === 'scale' || t === 'range') {
+        questionItem = { question: { required, scaleQuestion: { low: 1, high: 10, lowLabel: 'Minimum', highLabel: 'Maximum' } } };
       } else {
-        item.questionItem = { question: { required: q.required !== false, textQuestion: { paragraph: t === 'textarea' } } };
+        // text, integer, decimal, calculate, note, geopoint, image, audio, video, barcode etc
+        questionItem = { question: { required, textQuestion: { paragraph: (t === 'text' && (q.label || '').length > 40) } } };
       }
 
-      return { createItem: { item, location: { index: i } } };
+      requests.push({
+        createItem: {
+          item: {
+            title: q.label || ('Question ' + (i+1)),
+            description: q.hint || '',
+            questionItem
+          },
+          location: { index: i }
+        }
+      });
     });
 
     if (requests.length > 0) {
+      console.log('[GOOGLE] Ajout de ' + requests.length + ' questions...');
       const batchRes = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requests })
+        body: JSON.stringify({ requests, includeFormInResponse: false })
       });
       if (!batchRes.ok) {
-        const e = await batchRes.json();
-        console.error('[GOOGLE BATCH ERROR]', e);
+        const errBody = await batchRes.json();
+        console.error('[GOOGLE BATCH ERROR]', JSON.stringify(errBody));
+        return res.status(502).json({ error: 'BATCH_ERROR', message: 'Formulaire cree mais questions non ajoutees: ' + (errBody.error && errBody.error.message || 'Erreur inconnue') });
       }
+      console.log('[GOOGLE] Questions ajoutees avec succes');
     }
 
     console.log('[DEPLOY] Google Forms ok -> ' + formId);
