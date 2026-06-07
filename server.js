@@ -389,7 +389,7 @@ app.post('/api/deploy/google', async (req, res) => {
     const { accessToken } = credentials;
     if (!form || !accessToken) return res.status(400).json({ error: 'Token Google manquant' });
 
-    console.log('[DEPLOY] Google Forms');
+    console.log('[DEPLOY] Google Forms - ' + (form.questions||[]).length + ' questions');
 
     // 1. Creer le formulaire vide
     const createRes = await fetch('https://forms.googleapis.com/v1/forms', {
@@ -401,72 +401,263 @@ app.post('/api/deploy/google', async (req, res) => {
     if (!createRes.ok) {
       const e = await createRes.json();
       console.error('[GOOGLE ERROR]', e);
-      return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation Google Form. Verifiez autorisation.' });
+      return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation Google Form.' });
     }
 
     const createData = await createRes.json();
     const formId = createData.formId;
-    // URL d'edition pour que le client puisse verifier le formulaire
-    const formUrl = 'https://docs.google.com/forms/d/' + formId + '/edit';
+    console.log('[GOOGLE] FormId: ' + formId);
 
-    // 2. Ajouter les questions par batch
+    // 2. Analyser la structure pour determiner les sections necessaires
+    // Chaque groupe = 1 section
+    // Chaque question avec skip_logic = sa propre section pour permettre goToSectionId
     const questions = form.questions || [];
-    const requests = [];
 
-    questions.forEach(function(q, i) {
-      const t = q.selectedType || q.type || 'text';
-      const required = q.required !== false;
-      const choices = (q.choices || []).map(function(c) {
-        const label = typeof c === 'string' ? c : (c.label || String(c));
-        return { value: label };
-      });
+    // Grouper les questions par section logique
+    // Une section = un groupe de questions consecutives sans saut conditionnel entrant
+    // Les questions "autres precisez" ont besoin de leur propre section
 
-      let questionItem;
+    // Construire la liste des items dans l'ordre:
+    // Pour chaque groupe: pageBreak (section header) + questions du groupe
+    // Pour les questions "autres precisez": section separee
 
-      if ((t === 'select_one') && choices.length > 0) {
-        questionItem = { question: { required, choiceQuestion: { type: 'RADIO', options: choices, shuffle: false } } };
-      } else if ((t === 'select_multiple') && choices.length > 0) {
-        questionItem = { question: { required, choiceQuestion: { type: 'CHECKBOX', options: choices, shuffle: false } } };
-      } else if (t === 'date') {
-        questionItem = { question: { required, dateQuestion: { includeTime: false, includeYear: true } } };
-      } else if (t === 'time' || t === 'datetime') {
-        questionItem = { question: { required, timeQuestion: { duration: false } } };
-      } else if (t === 'scale' || t === 'range') {
-        questionItem = { question: { required, scaleQuestion: { low: 1, high: 10, lowLabel: 'Minimum', highLabel: 'Maximum' } } };
-      } else {
-        // text, integer, decimal, calculate, note, geopoint, image, audio, video, barcode etc
-        questionItem = { question: { required, textQuestion: { paragraph: (t === 'text' && (q.label || '').length > 40) } } };
+    const buildRequests = [];
+    let itemIdx = 0;
+
+    // Grouper par q.group
+    const groupMap = {};
+    const groupOrder = [];
+    questions.forEach(function(q) {
+      const g = q.group || 'general';
+      if (!groupMap[g]) { groupMap[g] = []; groupOrder.push(g); }
+      groupMap[g].push(q);
+    });
+
+    // Phase 1: Creer toutes les sections et questions sans navigation
+    // On recuperera les IDs apres pour ajouter la navigation
+
+    // Tracker les questions "autres precisez" et leur index dans le formulaire
+    const autreQuestions = []; // {questionIdx, parentIdx, autreChoiceValue}
+    const sectionItems = []; // Pour tracker les sections creees
+
+    groupOrder.forEach(function(gname) {
+      const qs = groupMap[gname];
+
+      // Ajouter section si pas le premier groupe ou si pas general
+      if (gname !== 'general' || groupOrder.indexOf(gname) > 0) {
+        buildRequests.push({
+          createItem: {
+            item: { title: gname !== 'general' ? gname : '', pageBreakItem: {} },
+            location: { index: itemIdx }
+          }
+        });
+        sectionItems.push({ type: 'section', name: gname, itemIdx });
+        itemIdx++;
       }
 
-      requests.push({
-        createItem: {
+      qs.forEach(function(q, qi) {
+        const t = q.selectedType || q.type || 'text';
+        const required = q.required !== false;
+        const choices = (q.choices || []).map(function(c) {
+          return { value: typeof c === 'string' ? c : (c.label || String(c)) };
+        });
+
+        // Detecter si c'est une question "autres precisez"
+        const isAutre = q.label && (
+          q.label.toLowerCase().includes('si autre') ||
+          (q.label.toLowerCase().includes('precis') && q.label.toLowerCase().includes('autre'))
+        );
+
+        let questionItem;
+
+        if ((t === 'select_one') && choices.length > 0) {
+          questionItem = { question: { required, choiceQuestion: { type: 'RADIO', options: choices, shuffle: false } } };
+        } else if ((t === 'select_multiple') && choices.length > 0) {
+          questionItem = { question: { required, choiceQuestion: { type: 'CHECKBOX', options: choices, shuffle: false } } };
+        } else if (t === 'date') {
+          questionItem = { question: { required, dateQuestion: { includeTime: false, includeYear: true } } };
+        } else if (t === 'time' || t === 'datetime') {
+          questionItem = { question: { required, timeQuestion: { duration: false } } };
+        } else if (t === 'scale' || t === 'range') {
+          const rMin = parseInt(q.numMin) || 1;
+          const rMax = parseInt(q.numMax) || 10;
+          questionItem = { question: { required, scaleQuestion: { low: rMin, high: rMax, lowLabel: 'Min', highLabel: 'Max' } } };
+        } else if (t === 'integer') {
+          questionItem = { question: { required, textQuestion: { paragraph: false } } };
+        } else if (t === 'decimal') {
+          questionItem = { question: { required, textQuestion: { paragraph: false } } };
+        } else {
+          questionItem = { question: { required, textQuestion: { paragraph: (q.label||'').length > 50 } } };
+        }
+
+        const hint = q.hint || '';
+        let numHint = hint;
+        if (t === 'integer' || t === 'decimal') {
+          // Ajouter min/max seulement si l'utilisateur les a précisés à l'étape 3
+          const parts = [];
+          if (q.numMin !== '' && q.numMin !== undefined && q.numMin !== null) parts.push('min: ' + q.numMin);
+          if (q.numMax !== '' && q.numMax !== undefined && q.numMax !== null) parts.push('max: ' + q.numMax);
+          if (parts.length > 0) {
+            numHint = (hint ? hint + ' — ' : '') + parts.join(', ');
+          }
+        }
+
+        buildRequests.push({
+          createItem: {
+            item: {
+              title: q.label || ('Question ' + (itemIdx+1)),
+              description: numHint,
+              questionItem
+            },
+            location: { index: itemIdx }
+          }
+        });
+
+        sectionItems.push({ type: 'question', q, itemIdx, gname, isAutre });
+        itemIdx++;
+      });
+    });
+
+    // Phase 2: Envoyer le batch initial
+    console.log('[GOOGLE] Phase 1: ' + buildRequests.length + ' items a creer');
+    const batch1Res = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: buildRequests, includeFormInResponse: true })
+    });
+
+    if (!batch1Res.ok) {
+      const e = await batch1Res.json();
+      console.error('[GOOGLE BATCH1 ERROR]', JSON.stringify(e).slice(0, 500));
+      return res.status(502).json({ error: 'BATCH_ERROR', message: 'Erreur ajout questions: ' + (e.error&&e.error.message||'Erreur') });
+    }
+
+    const batch1Data = await batch1Res.json();
+    const updatedForm = batch1Data.form;
+
+    // Phase 3: Recuperer les IDs des items crees pour la navigation
+    if (!updatedForm || !updatedForm.items) {
+      console.log('[GOOGLE] Formulaire sans items dans la reponse - navigation ignoree');
+      const formUrl = 'https://docs.google.com/forms/d/' + formId + '/edit';
+      return res.json({ success: true, formId, url: formUrl, questions: questions.length });
+    }
+
+    // Mapper les items par titre pour retrouver leurs IDs
+    const itemsByTitle = {};
+    updatedForm.items.forEach(function(item) {
+      if (item.title) itemsByTitle[item.title] = item.itemId;
+    });
+
+    // Phase 4: Ajouter navigation "go to section" pour les questions avec skip_logic
+    // Chercher les questions parentees aux "autres precisez"
+    const navRequests = [];
+
+    sectionItems.forEach(function(si, idx) {
+      if (si.type !== 'question') return;
+      const q = si.q;
+
+      // Chercher si la question suivante est une "autres precisez"
+      const nextSi = sectionItems[idx + 1];
+      if (!nextSi || !nextSi.isAutre) return;
+
+      // Cette question a une modalite "Autres" qui doit pointer vers la section suivante
+      const parentChoices = q.choices || [];
+      let autreChoiceIdx = -1;
+      parentChoices.forEach(function(c, ci) {
+        const lbl = (typeof c === 'string' ? c : c.label || '').toLowerCase();
+        if (lbl.includes('autre') || lbl.includes('other')) autreChoiceIdx = ci;
+      });
+
+      if (autreChoiceIdx < 0) return;
+
+      // Trouver l'ID de la section qui contient la question "autres precisez"
+      // La section precedant la question "autres precisez" dans sectionItems
+      let autreSectionId = null;
+      for (let i = idx + 1; i < sectionItems.length; i++) {
+        if (sectionItems[i].type === 'section') {
+          autreSectionId = itemsByTitle[sectionItems[i].name];
+          break;
+        }
+        // Si pas de section trouvee avant, la question "autres precisez" est dans la meme section
+        // On ne peut pas faire de navigation dans ce cas
+        break;
+      }
+
+      // Trouver la section APRES "autres precisez" pour les autres choix
+      let nextSectionId = null;
+      let foundAutre = false;
+      for (let i = idx + 2; i < sectionItems.length; i++) {
+        if (sectionItems[i].type === 'section') {
+          if (!foundAutre) { foundAutre = true; continue; }
+          nextSectionId = itemsByTitle[sectionItems[i].name];
+          break;
+        }
+      }
+
+      if (!autreSectionId) return; // Pas de section separee pour "autres precisez"
+
+      // Construire les options avec navigation
+      const parentItemId = itemsByTitle[q.label || ''];
+      if (!parentItemId) return;
+
+      const t = q.selectedType || q.type || 'text';
+      const optionsWithNav = (q.choices || []).map(function(c, ci) {
+        const label = typeof c === 'string' ? c : (c.label || String(c));
+        const opt = { value: label };
+        if (ci === autreChoiceIdx) {
+          // "Autres" -> aller a la section "autres precisez"
+          opt.goToSectionId = autreSectionId;
+        } else if (nextSectionId) {
+          // Autres choix -> sauter la section "autres precisez"
+          opt.goToSectionId = nextSectionId;
+        } else {
+          opt.goToAction = 'NEXT_SECTION';
+        }
+        return opt;
+      });
+
+      navRequests.push({
+        updateItem: {
           item: {
-            title: q.label || ('Question ' + (i+1)),
-            description: q.hint || '',
-            questionItem
+            itemId: parentItemId,
+            title: q.label || '',
+            questionItem: {
+              question: {
+                required: q.required !== false,
+                choiceQuestion: {
+                  type: t === 'select_multiple' ? 'CHECKBOX' : 'RADIO',
+                  options: optionsWithNav,
+                  shuffle: false
+                }
+              }
+            }
           },
-          location: { index: i }
+          location: { index: si.itemIdx },
+          updateMask: 'questionItem'
         }
       });
     });
 
-    if (requests.length > 0) {
-      console.log('[GOOGLE] Ajout de ' + requests.length + ' questions...');
-      const batchRes = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
+    // Phase 5: Appliquer la navigation si necessaire
+    if (navRequests.length > 0) {
+      console.log('[GOOGLE] Phase 2: ' + navRequests.length + ' navigations a configurer');
+      const batch2Res = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requests, includeFormInResponse: false })
+        body: JSON.stringify({ requests: navRequests })
       });
-      if (!batchRes.ok) {
-        const errBody = await batchRes.json();
-        console.error('[GOOGLE BATCH ERROR]', JSON.stringify(errBody));
-        return res.status(502).json({ error: 'BATCH_ERROR', message: 'Formulaire cree mais questions non ajoutees: ' + (errBody.error && errBody.error.message || 'Erreur inconnue') });
+      if (!batch2Res.ok) {
+        const e2 = await batch2Res.json();
+        console.warn('[GOOGLE BATCH2 WARN]', JSON.stringify(e2).slice(0, 300));
+        // Ne pas bloquer - le formulaire est cree, juste la navigation peut manquer
+      } else {
+        console.log('[GOOGLE] Navigation configuree avec succes');
       }
-      console.log('[GOOGLE] Questions ajoutees avec succes');
     }
 
-    console.log('[DEPLOY] Google Forms ok -> ' + formId);
-    res.json({ success: true, formId, url: formUrl, questions: (form.questions || []).length });
+    const formUrl = 'https://docs.google.com/forms/d/' + formId + '/edit';
+    console.log('[DEPLOY] Google Forms ok -> ' + formId + ' - ' + questions.length + ' questions');
+    res.json({ success: true, formId, url: formUrl, questions: questions.length });
 
   } catch(err) {
     console.error('[DEPLOY GOOGLE ERROR]', err.message);
@@ -474,130 +665,4 @@ app.post('/api/deploy/google', async (req, res) => {
   }
 });
 
-// ============ BUILDER KOBOTOOLBOX ============
-function buildKoboContent(form) {
-  var survey = [];
-  var choices = [];
-  var seen = new Set();
-  var groups = {};
 
-  (form.questions || []).forEach(function(q) {
-    var g = q.group || 'general';
-    if (!groups[g]) groups[g] = [];
-    groups[g].push(q);
-  });
-
-  Object.keys(groups).forEach(function(gname) {
-    var qs = groups[gname];
-    var gId = gname.replace(/\s+/g,'_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'').slice(0,32) || 'group';
-
-    if (gname !== 'general') survey.push({ type: 'begin_group', name: gId, label: gname });
-
-    qs.forEach(function(q) {
-      var fmtIdx = q.validatedFormatIdx !== undefined ? q.validatedFormatIdx : (q.suggested_format_idx || 0);
-      var selectedFmt = q.formats && q.formats[fmtIdx] ? q.formats[fmtIdx] : null;
-      var t = q.selectedType || (selectedFmt ? selectedFmt.type : null) || q.type || 'text';
-      var name = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g,'_');
-
-      var row = {
-        type: t,
-        name: name,
-        label: q.label || '',
-        required: q.required !== false ? 'yes' : 'no',
-        hint: q.hint || ''
-      };
-
-      // Skip logic — utilise les suggestions confirmées
-      var relevant = '';
-      if (q.suggestions) {
-        q.suggestions.forEach(function(s, si) {
-          if (s.type === 'skip_logic' && s.value && s.value.trim()) {
-            var confirmed = q.confirmedSuggestions && q.confirmedSuggestions[si];
-            if (confirmed) {
-              // Nettoyer et valider la formule XLSForm
-              var formula = s.value.trim();
-              // S'assurer que les références sont au bon format ${nom}
-              // Remplacer les libelles texte par les codes si possible
-              relevant = formula;
-            }
-          }
-        });
-      }
-      // Fallback sur q.relevant s'il existe et qu'aucune suggestion n'est confirmée
-      if (!relevant && q.relevant && q.relevant.trim()) relevant = q.relevant.trim();
-      if (relevant) row.relevant = relevant;
-
-      // Calcul
-      if (t === 'calculate') {
-        var calc = q.calculation || '';
-        if (!calc && q.suggestions) {
-          q.suggestions.forEach(function(s, si) {
-            if (s.type === 'calculate' && s.value) {
-              var confirmed = q.confirmedSuggestions && q.confirmedSuggestions[si];
-              if (confirmed) calc = s.value;
-            }
-          });
-        }
-        if (calc) row.calculation = calc;
-        delete row.required;
-      }
-
-      // Contraintes numériques
-      var constraints = [];
-      if (q.numMin !== '' && q.numMin !== undefined && q.numMin !== null) constraints.push('. >= ' + q.numMin);
-      if (q.numMax !== '' && q.numMax !== undefined && q.numMax !== null) constraints.push('. <= ' + q.numMax);
-      if (q.numDigitsBefore) constraints.push('string-length(substring-before(string(.), \'.\')) <= ' + q.numDigitsBefore);
-      if (q.numDigitsAfter) constraints.push('string-length(substring-after(string(.), \'.\')) <= ' + q.numDigitsAfter);
-      if (q.constraint && q.constraint.trim()) constraints.push(q.constraint.trim());
-      if (q.suggestions) {
-        q.suggestions.forEach(function(s, si) {
-          if (s.type === 'constraint' && s.value) {
-            var confirmed = q.confirmedSuggestions && q.confirmedSuggestions[si];
-            if (confirmed) constraints.push(s.value);
-          }
-        });
-      }
-      if (constraints.length > 0) {
-        row.constraint = constraints.join(' and ');
-        row.constraint_message = 'Valeur hors limites acceptees';
-      }
-
-      if (t === 'range') { row.parameters = 'start=' + (q.numMin||1) + ' end=' + (q.numMax||10); delete row.required; }
-      if (t === 'note' || t === 'calculate') delete row.required;
-
-      // Choix avec valeurs numériques
-      if (t === 'select_one' || t === 'select_multiple' || t === 'rank') {
-        var listName = 'list_' + name;
-        row.type = t + ' ' + listName;
-        if (!seen.has(listName)) {
-          seen.add(listName);
-          var choiceVals = q.choice_values || [];
-          (q.choices || []).forEach(function(c, i) {
-            var label = typeof c === 'string' ? c : (c.label || String(c));
-            // Toujours utiliser le code numérique (0, 1, 2...) comme valeur XLSForm
-            // C'est ce que KoboCollect utilise dans les formules relevant
-            var val;
-            if (choiceVals[i] !== undefined && choiceVals[i] !== '') {
-              val = String(choiceVals[i]);
-            } else {
-              // Par défaut: code numérique basé sur l'index (0, 1, 2...)
-              val = String(i);
-            }
-            choices.push({ list_name: listName, name: val, label: label });
-          });
-        }
-      }
-
-      survey.push(row);
-    });
-
-    if (gname !== 'general') survey.push({ type: 'end_group', name: gId });
-  });
-
-  var formId = (form.title||'formulaire').replace(/\s+/g,'_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'').slice(0,32);
-  return { survey: survey, choices: choices, settings: [{ form_title: form.title || 'Formulaire', form_id: formId, version: '1' }] };
-}
-
-app.listen(PORT, function() {
-  console.log('\n╔══════════════════════════════════╗\n║   R2 Forms Backend v3.2          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
-});
