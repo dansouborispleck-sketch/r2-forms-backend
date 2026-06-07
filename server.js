@@ -433,92 +433,81 @@ app.post('/api/deploy/google', async (req, res) => {
       groupMap[g].push(q);
     });
 
-    // Phase 1: Creer toutes les sections et questions sans navigation
-    // On recuperera les IDs apres pour ajouter la navigation
+    // Phase 1: Creer toutes les sections et questions
+    // Les questions "autres precisez" ont leur propre section pour goToSectionId
+    const sectionItems = [];
 
-    // Tracker les questions "autres precisez" et leur index dans le formulaire
-    const autreQuestions = []; // {questionIdx, parentIdx, autreChoiceValue}
-    const sectionItems = []; // Pour tracker les sections creees
+    function makeQuestionItem(q) {
+      const t = q.selectedType || q.type || 'text';
+      const required = q.required !== false;
+      const choices = (q.choices || []).map(function(c) {
+        return { value: typeof c === 'string' ? c : (c.label || String(c)) };
+      });
+      if ((t === 'select_one') && choices.length > 0)
+        return { question: { required, choiceQuestion: { type: 'RADIO', options: choices, shuffle: false } } };
+      if ((t === 'select_multiple') && choices.length > 0)
+        return { question: { required, choiceQuestion: { type: 'CHECKBOX', options: choices, shuffle: false } } };
+      if (t === 'date')
+        return { question: { required, dateQuestion: { includeTime: false, includeYear: true } } };
+      if (t === 'time' || t === 'datetime')
+        return { question: { required, timeQuestion: { duration: false } } };
+      if (t === 'scale' || t === 'range') {
+        const rMin = parseInt(q.numMin) || 1;
+        const rMax = parseInt(q.numMax) || 10;
+        return { question: { required, scaleQuestion: { low: rMin, high: rMax, lowLabel: 'Min', highLabel: 'Max' } } };
+      }
+      return { question: { required, textQuestion: { paragraph: (q.label||'').length > 50 } } };
+    }
+
+    function makeHint(q) {
+      const t = q.selectedType || q.type || 'text';
+      const hint = q.hint || '';
+      if (t === 'integer' || t === 'decimal') {
+        const parts = [];
+        if (q.numMin !== '' && q.numMin !== undefined && q.numMin !== null) parts.push('min: ' + q.numMin);
+        if (q.numMax !== '' && q.numMax !== undefined && q.numMax !== null) parts.push('max: ' + q.numMax);
+        if (parts.length > 0) return (hint ? hint + ' — ' : '') + parts.join(', ');
+      }
+      return hint;
+    }
+
+    function isAutreQuestion(q) {
+      if (!q.label) return false;
+      const lbl = q.label.toLowerCase();
+      return lbl.includes('si autre') || lbl.includes('precisez') || lbl.includes('preciser');
+    }
 
     groupOrder.forEach(function(gname) {
       const qs = groupMap[gname];
-
-      // Ajouter section si pas le premier groupe ou si pas general
-      if (gname !== 'general' || groupOrder.indexOf(gname) > 0) {
-        buildRequests.push({
-          createItem: {
-            item: { title: gname !== 'general' ? gname : '', pageBreakItem: {} },
-            location: { index: itemIdx }
-          }
-        });
+      if (gname !== 'general') {
+        buildRequests.push({ createItem: { item: { title: gname, pageBreakItem: {} }, location: { index: itemIdx } } });
         sectionItems.push({ type: 'section', name: gname, itemIdx });
         itemIdx++;
       }
-
-      qs.forEach(function(q, qi) {
-        const t = q.selectedType || q.type || 'text';
-        const required = q.required !== false;
-        const choices = (q.choices || []).map(function(c) {
-          return { value: typeof c === 'string' ? c : (c.label || String(c)) };
-        });
-
-        // Detecter si c'est une question "autres precisez"
-        const isAutre = q.label && (
-          q.label.toLowerCase().includes('si autre') ||
-          (q.label.toLowerCase().includes('precis') && q.label.toLowerCase().includes('autre'))
-        );
-
-        let questionItem;
-
-        if ((t === 'select_one') && choices.length > 0) {
-          questionItem = { question: { required, choiceQuestion: { type: 'RADIO', options: choices, shuffle: false } } };
-        } else if ((t === 'select_multiple') && choices.length > 0) {
-          questionItem = { question: { required, choiceQuestion: { type: 'CHECKBOX', options: choices, shuffle: false } } };
-        } else if (t === 'date') {
-          questionItem = { question: { required, dateQuestion: { includeTime: false, includeYear: true } } };
-        } else if (t === 'time' || t === 'datetime') {
-          questionItem = { question: { required, timeQuestion: { duration: false } } };
-        } else if (t === 'scale' || t === 'range') {
-          const rMin = parseInt(q.numMin) || 1;
-          const rMax = parseInt(q.numMax) || 10;
-          questionItem = { question: { required, scaleQuestion: { low: rMin, high: rMax, lowLabel: 'Min', highLabel: 'Max' } } };
-        } else if (t === 'integer') {
-          questionItem = { question: { required, textQuestion: { paragraph: false } } };
-        } else if (t === 'decimal') {
-          questionItem = { question: { required, textQuestion: { paragraph: false } } };
-        } else {
-          questionItem = { question: { required, textQuestion: { paragraph: (q.label||'').length > 50 } } };
+      qs.forEach(function(q) {
+        const isAutre = isAutreQuestion(q);
+        if (isAutre) {
+          // Section vide dedicee avant chaque question "autres precisez"
+          buildRequests.push({ createItem: { item: { title: '', pageBreakItem: {} }, location: { index: itemIdx } } });
+          sectionItems.push({ type: 'section', name: '_autre_' + itemIdx, itemIdx, isAutreSection: true });
+          itemIdx++;
         }
-
-        const hint = q.hint || '';
-        let numHint = hint;
-        if (t === 'integer' || t === 'decimal') {
-          // Ajouter min/max seulement si l'utilisateur les a précisés à l'étape 3
-          const parts = [];
-          if (q.numMin !== '' && q.numMin !== undefined && q.numMin !== null) parts.push('min: ' + q.numMin);
-          if (q.numMax !== '' && q.numMax !== undefined && q.numMax !== null) parts.push('max: ' + q.numMax);
-          if (parts.length > 0) {
-            numHint = (hint ? hint + ' — ' : '') + parts.join(', ');
-          }
-        }
-
         buildRequests.push({
           createItem: {
-            item: {
-              title: q.label || ('Question ' + (itemIdx+1)),
-              description: numHint,
-              questionItem
-            },
+            item: { title: q.label || ('Q' + (itemIdx+1)), description: makeHint(q), questionItem: makeQuestionItem(q) },
             location: { index: itemIdx }
           }
         });
-
         sectionItems.push({ type: 'question', q, itemIdx, gname, isAutre });
         itemIdx++;
       });
     });
+    // Section finale pour absorber les sauts "passer la précision"
+    buildRequests.push({ createItem: { item: { title: '', pageBreakItem: {} }, location: { index: itemIdx } } });
+    sectionItems.push({ type: 'section', name: '_final', itemIdx, isFinal: true });
+    itemIdx++;
 
-    // Phase 2: Envoyer le batch initial
+        // Phase 2: Envoyer le batch initial
     console.log('[GOOGLE] Phase 1: ' + buildRequests.length + ' items a creer');
     const batch1Res = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
       method: 'POST',
@@ -548,56 +537,67 @@ app.post('/api/deploy/google', async (req, res) => {
       if (item.title) itemsByTitle[item.title] = item.itemId;
     });
 
-    // Phase 4: Ajouter navigation "go to section" pour les questions avec skip_logic
-    // Chercher les questions parentees aux "autres precisez"
+    // Phase 4: Navigation goToSectionId pour les questions avec "Autres"
     const navRequests = [];
 
+    // Mapper items par index pour trouver leurs IDs
+    const itemsByIndex = {};
+    if (updatedForm && updatedForm.items) {
+      updatedForm.items.forEach(function(item) {
+        itemsByIndex[item.itemId] = item;
+      });
+    }
+
+    // Reconstruire la liste des items dans l'ordre par index
+    const orderedItems = updatedForm && updatedForm.items
+      ? updatedForm.items.slice().sort(function(a,b) { return (a.index||0)-(b.index||0); })
+      : [];
+
+    // Associer chaque sectionItem a son itemId Google
+    // Les items sont crees dans l'ordre, donc on peut les mapper par position
+    const sectionItemIds = {};
+    orderedItems.forEach(function(item, i) {
+      if (sectionItems[i]) {
+        sectionItemIds[i] = item.itemId;
+        sectionItems[i].googleItemId = item.itemId;
+      }
+    });
+
+    // Trouver les paires: question parente -> section "autres precisez"
     sectionItems.forEach(function(si, idx) {
       if (si.type !== 'question') return;
       const q = si.q;
 
-      // Chercher si la question suivante est une "autres precisez"
-      const nextSi = sectionItems[idx + 1];
-      if (!nextSi || !nextSi.isAutre) return;
+      // Chercher si la question suivante est une section "autres" puis une question "autres precisez"
+      const nextSi = sectionItems[idx + 1]; // devrait etre la section _autre_section_
+      const nextNextSi = sectionItems[idx + 2]; // devrait etre la question "autres precisez"
 
-      // Cette question a une modalite "Autres" qui doit pointer vers la section suivante
+      if (!nextSi || !nextSi.isAutreSection) return;
+      if (!nextNextSi || !nextNextSi.isAutre) return;
+
+      // Cette question a une modalite "Autres"
       const parentChoices = q.choices || [];
       let autreChoiceIdx = -1;
       parentChoices.forEach(function(c, ci) {
         const lbl = (typeof c === 'string' ? c : c.label || '').toLowerCase();
         if (lbl.includes('autre') || lbl.includes('other')) autreChoiceIdx = ci;
       });
-
       if (autreChoiceIdx < 0) return;
 
-      // Trouver l'ID de la section qui contient la question "autres precisez"
-      // La section precedant la question "autres precisez" dans sectionItems
-      let autreSectionId = null;
-      for (let i = idx + 1; i < sectionItems.length; i++) {
-        if (sectionItems[i].type === 'section') {
-          autreSectionId = itemsByTitle[sectionItems[i].name];
-          break;
-        }
-        // Si pas de section trouvee avant, la question "autres precisez" est dans la meme section
-        // On ne peut pas faire de navigation dans ce cas
-        break;
-      }
+      // IDs des sections
+      const autreSectionItemId = nextSi.googleItemId; // section avant "autres precisez"
+      if (!autreSectionItemId) return;
 
-      // Trouver la section APRES "autres precisez" pour les autres choix
-      let nextSectionId = null;
-      let foundAutre = false;
-      for (let i = idx + 2; i < sectionItems.length; i++) {
+      // Trouver la section finale ou la section apres "autres precisez"
+      let skipSectionItemId = null;
+      for (let i = idx + 3; i < sectionItems.length; i++) {
         if (sectionItems[i].type === 'section') {
-          if (!foundAutre) { foundAutre = true; continue; }
-          nextSectionId = itemsByTitle[sectionItems[i].name];
+          skipSectionItemId = sectionItems[i].googleItemId;
           break;
         }
       }
 
-      if (!autreSectionId) return; // Pas de section separee pour "autres precisez"
-
-      // Construire les options avec navigation
-      const parentItemId = itemsByTitle[q.label || ''];
+      const parentItemId = si.googleItemId;
       if (!parentItemId) return;
 
       const t = q.selectedType || q.type || 'text';
@@ -605,16 +605,16 @@ app.post('/api/deploy/google', async (req, res) => {
         const label = typeof c === 'string' ? c : (c.label || String(c));
         const opt = { value: label };
         if (ci === autreChoiceIdx) {
-          // "Autres" -> aller a la section "autres precisez"
-          opt.goToSectionId = autreSectionId;
-        } else if (nextSectionId) {
-          // Autres choix -> sauter la section "autres precisez"
-          opt.goToSectionId = nextSectionId;
+          opt.goToSectionId = autreSectionItemId;
+        } else if (skipSectionItemId) {
+          opt.goToSectionId = skipSectionItemId;
         } else {
-          opt.goToAction = 'NEXT_SECTION';
+          opt.goToAction = 'SUBMIT_FORM';
         }
         return opt;
       });
+
+      console.log('[GOOGLE] Navigation: "' + (q.label||'').slice(0,30) + '" -> Autres: ' + autreSectionItemId + ' / Skip: ' + skipSectionItemId);
 
       navRequests.push({
         updateItem: {
