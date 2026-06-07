@@ -121,7 +121,7 @@ app.post('/api/analyse', async (req, res) => {
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5',
-        max_tokens: 8192,
+        max_tokens: 32000,
         system: system,
         messages: [{ role: 'user', content: 'Extrais TOUTES les questions de ce questionnaire sans en oublier aucune:\n\n' + inputText }]
       })
@@ -306,6 +306,155 @@ app.post('/api/deploy/kobo', async (req, res) => {
     res.json({ success: true, uid: uid, url: server + '/#/forms/' + uid + '/summary', questions: qCount });
   } catch(err) {
     console.error('[DEPLOY ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+  }
+});
+
+// ============ DEPLOIEMENT JOTFORM ============
+app.post('/api/deploy/jotform', async (req, res) => {
+  try {
+    const { form, credentials } = req.body;
+    const { apiKey } = credentials;
+    if (!form || !apiKey) return res.status(400).json({ error: 'Donnees manquantes' });
+
+    console.log('[DEPLOY] JotForm');
+
+    // 1. Verifier la cle API
+    const userRes = await fetch('https://api.jotform.com/user?apiKey=' + apiKey);
+    if (!userRes.ok) return res.status(401).json({ error: 'AUTH_ERROR', message: 'Cle API JotForm incorrecte.' });
+    const userData = await userRes.json();
+    if (userData.responseCode !== 200) return res.status(401).json({ error: 'AUTH_ERROR', message: 'Cle API invalide.' });
+
+    // 2. Creer le formulaire
+    const createRes = await fetch('https://api.jotform.com/form?apiKey=' + apiKey, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'questions%5B0%5D%5Btype%5D=control_head&questions%5B0%5D%5Btext%5D=' + encodeURIComponent(form.title || 'Formulaire R2') + '&properties%5Btitle%5D=' + encodeURIComponent(form.title || 'Formulaire R2')
+    });
+
+    if (!createRes.ok) return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation formulaire JotForm.' });
+    const createData = await createRes.json();
+    const formId = createData.content && createData.content.id;
+    if (!formId) return res.status(502).json({ error: 'CREATE_ERROR', message: 'ID formulaire non recu.' });
+
+    // 3. Ajouter les questions une par une
+    const questions = form.questions || [];
+    let qOrder = 1;
+    for (const q of questions) {
+      const t = q.selectedType || q.type || 'text';
+      let qType = 'control_textbox';
+      if (t === 'select_one') qType = 'control_radio';
+      else if (t === 'select_multiple') qType = 'control_checkbox';
+      else if (t === 'integer' || t === 'decimal') qType = 'control_number';
+      else if (t === 'date') qType = 'control_datetime';
+      else if (t === 'image') qType = 'control_fileupload';
+      else if (t === 'textarea') qType = 'control_textarea';
+
+      const qData = new URLSearchParams();
+      qData.append('questions[' + qOrder + '][type]', qType);
+      qData.append('questions[' + qOrder + '][text]', q.label || '');
+      qData.append('questions[' + qOrder + '][required]', q.required ? 'Yes' : 'No');
+      qData.append('questions[' + qOrder + '][order]', String(qOrder));
+
+      // Ajouter les choix pour radio/checkbox
+      if ((qType === 'control_radio' || qType === 'control_checkbox') && q.choices && q.choices.length > 0) {
+        q.choices.forEach(function(c, i) {
+          const label = typeof c === 'string' ? c : (c.label || String(c));
+          qData.append('questions[' + qOrder + '][options]', label);
+        });
+      }
+
+      await fetch('https://api.jotform.com/form/' + formId + '/questions?apiKey=' + apiKey, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: qData.toString()
+      });
+      qOrder++;
+    }
+
+    const formUrl = 'https://www.jotform.com/' + formId;
+    console.log('[DEPLOY] JotForm ok -> ' + formId);
+    res.json({ success: true, formId, url: formUrl, questions: questions.length });
+
+  } catch(err) {
+    console.error('[DEPLOY JOTFORM ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+  }
+});
+
+// ============ DEPLOIEMENT GOOGLE FORMS (OAuth2) ============
+app.post('/api/deploy/google', async (req, res) => {
+  try {
+    const { form, credentials } = req.body;
+    const { accessToken } = credentials;
+    if (!form || !accessToken) return res.status(400).json({ error: 'Token Google manquant' });
+
+    console.log('[DEPLOY] Google Forms');
+
+    // 1. Creer le formulaire vide
+    const createRes = await fetch('https://forms.googleapis.com/v1/forms', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ info: { title: form.title || 'Formulaire R2', documentTitle: form.title || 'Formulaire R2' } })
+    });
+
+    if (!createRes.ok) {
+      const e = await createRes.json();
+      console.error('[GOOGLE ERROR]', e);
+      return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation Google Form. Verifiez autorisation.' });
+    }
+
+    const createData = await createRes.json();
+    const formId = createData.formId;
+    const formUrl = createData.responderUri || ('https://docs.google.com/forms/d/' + formId + '/viewform');
+
+    // 2. Ajouter les questions par batch
+    const requests = (form.questions || []).map(function(q, i) {
+      const t = q.selectedType || q.type || 'text';
+      let item = { title: q.label || '', required: q.required !== false };
+
+      if (t === 'select_one') {
+        item.questionItem = { question: { required: q.required !== false, choiceQuestion: {
+          type: 'RADIO',
+          options: (q.choices || []).map(function(c) { return { value: typeof c === 'string' ? c : c.label }; }),
+          shuffle: false
+        }}};
+      } else if (t === 'select_multiple') {
+        item.questionItem = { question: { required: q.required !== false, choiceQuestion: {
+          type: 'CHECKBOX',
+          options: (q.choices || []).map(function(c) { return { value: typeof c === 'string' ? c : c.label }; }),
+          shuffle: false
+        }}};
+      } else if (t === 'integer' || t === 'decimal') {
+        item.questionItem = { question: { required: q.required !== false, textQuestion: { paragraph: false } } };
+      } else if (t === 'date') {
+        item.questionItem = { question: { required: q.required !== false, dateQuestion: { includeTime: false, includeYear: true } } };
+      } else if (t === 'time') {
+        item.questionItem = { question: { required: q.required !== false, timeQuestion: { duration: false } } };
+      } else {
+        item.questionItem = { question: { required: q.required !== false, textQuestion: { paragraph: t === 'textarea' } } };
+      }
+
+      return { createItem: { item, location: { index: i } } };
+    });
+
+    if (requests.length > 0) {
+      const batchRes = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests })
+      });
+      if (!batchRes.ok) {
+        const e = await batchRes.json();
+        console.error('[GOOGLE BATCH ERROR]', e);
+      }
+    }
+
+    console.log('[DEPLOY] Google Forms ok -> ' + formId);
+    res.json({ success: true, formId, url: formUrl, questions: (form.questions || []).length });
+
+  } catch(err) {
+    console.error('[DEPLOY GOOGLE ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
   }
 });
