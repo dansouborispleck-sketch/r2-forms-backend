@@ -1,6 +1,6 @@
 {
   "name": "r2-forms-backend",
-  "version": "2.0.0",
+  "version": "4.1.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -8,11 +8,15 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.5",
+    "express-validator": "^7.0.1",
     "multer": "^1.4.5-lts.1",
     "mammoth": "^1.6.0",
     "xlsx": "^0.18.5",
     "pdf-parse": "^1.1.1",
     "node-fetch": "^2.7.0",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "redis": "^4.6.12"
   }
 }
