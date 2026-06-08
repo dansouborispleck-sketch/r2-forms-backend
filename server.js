@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const ExcelJS = require('exceljs');
 const cors = require('cors');
 const multer = require('multer');
 const mammoth = require('mammoth');
@@ -634,33 +635,191 @@ app.post('/api/deploy/excel', async (req, res) => {
     const questions = form.questions || [];
     console.log('[EXCEL] Generation - ' + questions.length + ' questions');
 
-    const { execFile } = require('child_process');
-    const os = require('os');
-    const fsNode = require('fs');
-    const tmpFile = os.tmpdir() + '/r2_' + Date.now() + '.xlsx';
+    // Mots vides francais a supprimer des noms de variables
+    const stopWords = new Set(['quel','quelle','quels','quelles','est','sont','avez','vous','votre','vos','etes','avons','ont','avoir','quoi','comment','combien','pourquoi','si','oui','non','les','des','une','un','la','le','au','aux','du','de','que','qui','quand','par','pour','avec','sans','sur','sous','dans','entre','vers','chez','en','et','mais','donc','car','ni','or','pas','ne','plus','moins','tres','bien','tout','tous','toute','toutes','autre','autres','meme','plusieurs','quelques','ete','fait','fois']);
 
-    await new Promise(function(resolve, reject) {
-      execFile('python3', ['/app/generate_excel.py', JSON.stringify(form), tmpFile],
-        { timeout: 30000, maxBuffer: 10 * 1024 * 1024 },
-        function(err, stdout, stderr) {
-          if (err) { reject(new Error(stderr || err.message)); return; }
-          resolve();
-        }
-      );
+    function makeVarName(label) {
+      var s = label.normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+      var words = s.replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(function(w){ return w.length>2 && !stopWords.has(w); });
+      var v = words.slice(0,3).join('_').slice(0,30).replace(/_+$/,'');
+      return v || 'variable';
+    }
+
+    // Grouper par section + noms uniques
+    var groupMap = {}, groupOrder = [], usedNames = {}, colMeta = [];
+    questions.forEach(function(q) {
+      var g = q.group || 'General';
+      if (!groupMap[g]) { groupMap[g] = []; groupOrder.push(g); }
+      groupMap[g].push(q);
+      var base = makeVarName(q.label || q.id || 'var');
+      var varname = base;
+      if (usedNames[base]) { usedNames[base]++; varname = base + '_' + usedNames[base]; }
+      else usedNames[base] = 1;
+      colMeta.push({ q: q, group: g, varname: varname });
     });
 
-    const buf = fsNode.readFileSync(tmpFile);
-    try { fsNode.unlinkSync(tmpFile); } catch(e) {}
+    var wb = new ExcelJS.Workbook();
+    wb.creator = 'R2 Forms';
+    var ws1 = wb.addWorksheet('Saisie');
+    var ws2 = wb.addWorksheet('Dictionnaire');
 
-    const filename = (form.title || 'formulaire').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,40) + '_masque.xlsx';
+    // Styles
+    var secFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF1F4E79' } };
+    var varFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF2E75B6' } };
+    var oddFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFEBF3FB' } };
+    var evnFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFFFFFFF' } };
+    var whtFont = { name:'Arial', bold:true, color:{ argb:'FFFFFFFF' }, size:10 };
+    var varFont = { name:'Arial', bold:true, color:{ argb:'FFFFFFFF' }, size:9 };
+    var datFont = { name:'Arial', size:9 };
+    var brd = { top:{style:'thin',color:{argb:'FFBDD7EE'}}, bottom:{style:'thin',color:{argb:'FFBDD7EE'}}, left:{style:'thin',color:{argb:'FFBDD7EE'}}, right:{style:'thin',color:{argb:'FFBDD7EE'}} };
+
+    // === FEUILLE 1: SAISIE ===
+    // Ligne 1: sections fusionnées
+    var r1 = ws1.getRow(1);
+    r1.height = 22;
+    var col = 1;
+    groupOrder.forEach(function(g) {
+      var n = groupMap[g].length;
+      var cell = ws1.getCell(1, col);
+      cell.value = g;
+      cell.font = whtFont; cell.fill = secFill; cell.border = brd;
+      cell.alignment = { horizontal:'center', vertical:'middle' };
+      if (n > 1) ws1.mergeCells(1, col, 1, col+n-1);
+      col += n;
+    });
+
+    // Ligne 2: noms variables
+    var r2 = ws1.getRow(2);
+    r2.height = 20;
+    colMeta.forEach(function(meta, i) {
+      var cell = ws1.getCell(2, i+1);
+      cell.value = meta.varname;
+      cell.font = varFont; cell.fill = varFill; cell.border = brd;
+      cell.alignment = { horizontal:'center', vertical:'middle' };
+    });
+
+    ws1.views = [{ state:'frozen', ySplit:2 }];
+
+    // 100 lignes de saisie
+    var N = 100;
+    for (var row = 3; row <= 2+N; row++) {
+      var fill = (row % 2 === 1) ? oddFill : evnFill;
+      var exRow = ws1.getRow(row);
+      exRow.height = 18;
+      colMeta.forEach(function(meta, i) {
+        var cell = ws1.getCell(row, i+1);
+        cell.fill = fill; cell.border = brd; cell.font = datFont;
+        cell.alignment = { horizontal:'left', vertical:'middle' };
+      });
+    }
+
+    // Validations et formats par colonne
+    colMeta.forEach(function(meta, i) {
+      var q = meta.q;
+      var t = q.selectedType || q.type || 'text';
+      var colNum = i + 1;
+
+      for (var row = 3; row <= 2+N; row++) {
+        var cell = ws1.getCell(row, colNum);
+
+        if (t === 'select_one' || t === 'select_multiple') {
+          var choices = (q.choices || []).map(function(c){ return typeof c==='string'?c:(c.label||String(c)); });
+          if (choices.length > 0) {
+            var formula = '"' + choices.slice(0,20).join(',') + '"';
+            if (formula.length <= 255) {
+              cell.dataValidation = {
+                type: 'list',
+                allowBlank: true,
+                formulae: [formula],
+                showErrorMessage: true,
+                errorStyle: 'stop',
+                errorTitle: 'Valeur invalide',
+                error: 'Choisissez une valeur dans la liste',
+                showInputMessage: true,
+                promptTitle: (q.label||'').slice(0,32),
+                prompt: 'Selectionnez une option'
+              };
+            }
+          }
+        }
+
+        else if (t === 'integer') {
+          var nm = q.numMin, nx = q.numMax;
+          var nmOk = nm !== '' && nm != null, nxOk = nx !== '' && nx != null;
+          var dv = { type:'whole', allowBlank:true, showErrorMessage:true, errorStyle:'stop', errorTitle:'Valeur invalide', error:'Entrez un nombre entier valide' };
+          if (nmOk && nxOk) { dv.operator='between'; dv.formulae=[String(nm),String(nx)]; }
+          else if (nmOk) { dv.operator='greaterThanOrEqual'; dv.formulae=[String(nm)]; }
+          else if (nxOk) { dv.operator='lessThanOrEqual'; dv.formulae=[String(nx)]; }
+          else { dv.operator='between'; dv.formulae=['-999999','999999']; }
+          cell.dataValidation = dv;
+          cell.numFmt = '0';
+        }
+
+        else if (t === 'decimal') {
+          var nm2 = q.numMin, nx2 = q.numMax;
+          var nm2Ok = nm2 !== '' && nm2 != null, nx2Ok = nx2 !== '' && nx2 != null;
+          var dv2 = { type:'decimal', allowBlank:true, showErrorMessage:true, errorStyle:'stop', errorTitle:'Valeur invalide', error:'Entrez un nombre decimal valide' };
+          if (nm2Ok && nx2Ok) { dv2.operator='between'; dv2.formulae=[String(nm2),String(nx2)]; }
+          else { dv2.operator='between'; dv2.formulae=['-999999','999999']; }
+          cell.dataValidation = dv2;
+          var after = q.numDigitsAfter;
+          cell.numFmt = '0.' + '0'.repeat(after && String(after).match(/^\d+$/) ? parseInt(after) : 2);
+        }
+
+        else if (t === 'date') {
+          cell.dataValidation = { type:'date', allowBlank:true, showInputMessage:true, promptTitle:'Date', prompt:'Format: JJ/MM/AAAA' };
+          cell.numFmt = 'DD/MM/YYYY';
+        }
+
+        else if (t === 'time') {
+          cell.numFmt = 'HH:MM';
+        }
+
+        else if (t === 'datetime') {
+          cell.numFmt = 'DD/MM/YYYY HH:MM';
+        }
+      }
+
+      // Largeur colonne
+      ws1.getColumn(colNum).width = Math.max(15, Math.min(28, meta.varname.length + 4));
+    });
+
+    // === FEUILLE 2: DICTIONNAIRE ===
+    var typeLabels = { select_one:'Choix unique', select_multiple:'Choix multiple', integer:'Nombre entier', decimal:'Nombre decimal', date:'Date', time:'Heure', datetime:'Date et heure', text:'Texte libre', calculate:'Calcul auto', geopoint:'GPS', image:'Photo', audio:'Audio', video:'Video', file:'Fichier', barcode:'Code-barres', acknowledge:'Confirmation', rank:'Classement', range:'Echelle', note:'Note' };
+    var hdrs = ['Variable','Libelle complet de la question','Type','Section','Obligatoire','Modalites'];
+    var hdrRow = ws2.getRow(1);
+    hdrRow.height = 20;
+    hdrs.forEach(function(h, j) {
+      var cell = ws2.getCell(1, j+1);
+      cell.value = h; cell.font = whtFont; cell.fill = secFill; cell.border = brd;
+      cell.alignment = { horizontal:'center', vertical:'middle' };
+    });
+    ws2.views = [{ state:'frozen', ySplit:1 }];
+    ws2.columns = [{ width:22 },{ width:55 },{ width:18 },{ width:25 },{ width:12 },{ width:45 }];
+
+    colMeta.forEach(function(meta, r) {
+      var q = meta.q;
+      var t = q.selectedType || q.type || 'text';
+      var choices = (q.choices||[]).map(function(c){ return typeof c==='string'?c:(c.label||String(c)); }).join(' / ');
+      var fill = (r%2===0) ? oddFill : evnFill;
+      var rowData = [meta.varname, q.label||'', typeLabels[t]||t, meta.group, q.required!==false?'Oui':'Non', choices];
+      rowData.forEach(function(val, j) {
+        var cell = ws2.getCell(r+2, j+1);
+        cell.value = val; cell.font = datFont; cell.fill = fill; cell.border = brd;
+        cell.alignment = { horizontal:'left', vertical:'middle', wrapText:(j===1||j===5) };
+      });
+    });
+
+    // Generer le buffer
+    var filename = (form.title||'formulaire').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,40) + '_masque.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
-    res.send(buf);
+    await wb.xlsx.write(res);
     console.log('[EXCEL] ok - ' + filename);
 
   } catch(err) {
     console.error('[EXCEL ERROR]', err.message);
-    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+    if (!res.headersSent) res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
   }
 });
 
