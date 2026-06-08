@@ -270,22 +270,22 @@ app.post('/api/deploy/jotform', async (req, res) => {
     const { apiKey } = credentials;
     if (!form || !apiKey) return res.status(400).json({ error: 'Donnees manquantes' });
     console.log('[DEPLOY] JotForm');
+
+    // 1. Verifier la cle API
     const userRes = await fetch('https://api.jotform.com/user?apiKey=' + apiKey);
-    if (!userRes.ok) return res.status(401).json({ error: 'AUTH_ERROR', message: 'Cle API JotForm incorrecte.' });
     const userData = await userRes.json();
-    if (userData.responseCode !== 200) return res.status(401).json({ error: 'AUTH_ERROR', message: 'Cle API invalide.' });
-    const createRes = await fetch('https://api.jotform.com/form?apiKey=' + apiKey, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'questions%5B0%5D%5Btype%5D=control_head&questions%5B0%5D%5Btext%5D=' + encodeURIComponent(form.title || 'Formulaire R2') + '&properties%5Btitle%5D=' + encodeURIComponent(form.title || 'Formulaire R2')
-    });
-    if (!createRes.ok) return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation formulaire JotForm.' });
-    const createData = await createRes.json();
-    const formId = createData.content && createData.content.id;
-    if (!formId) return res.status(502).json({ error: 'CREATE_ERROR', message: 'ID formulaire non recu.' });
+    if (!userRes.ok || userData.responseCode !== 200) {
+      return res.status(401).json({ error: 'AUTH_ERROR', message: 'Cle API JotForm incorrecte.' });
+    }
+
+    // 2. Construire le formulaire complet avec toutes les questions
     const questions = form.questions || [];
-    for (var qi = 0; qi < questions.length; qi++) {
-      var q = questions[qi];
+    const jotformQuestions = {};
+
+    // Question 0: en-tete
+    jotformQuestions['0'] = { type: 'control_head', text: form.title || 'Formulaire R2', order: '1', name: 'header' };
+
+    questions.forEach(function(q, qi) {
       var t = q.selectedType || q.type || 'text';
       var qType = 'control_textbox';
       if (t === 'select_one') qType = 'control_radio';
@@ -293,25 +293,59 @@ app.post('/api/deploy/jotform', async (req, res) => {
       else if (t === 'integer' || t === 'decimal') qType = 'control_number';
       else if (t === 'date') qType = 'control_datetime';
       else if (t === 'image') qType = 'control_fileupload';
-      var qData = new URLSearchParams();
-      qData.append('questions[' + (qi+1) + '][type]', qType);
-      qData.append('questions[' + (qi+1) + '][text]', q.label || '');
-      qData.append('questions[' + (qi+1) + '][required]', q.required ? 'Yes' : 'No');
-      qData.append('questions[' + (qi+1) + '][order]', String(qi+1));
+      else if (t === 'audio' || t === 'video' || t === 'file') qType = 'control_fileupload';
+
+      var qObj = {
+        type: qType,
+        text: q.label || ('Question ' + (qi+1)),
+        order: String(qi + 2),
+        name: 'q' + (qi+1),
+        required: q.required !== false ? 'Yes' : 'No',
+        hint: q.hint || ''
+      };
+
+      // Ajouter les choix
       if ((qType === 'control_radio' || qType === 'control_checkbox') && q.choices && q.choices.length > 0) {
-        q.choices.forEach(function(c) {
-          var label = typeof c === 'string' ? c : (c.label || String(c));
-          qData.append('questions[' + (qi+1) + '][options]', label);
-        });
+        qObj.options = q.choices.map(function(c) {
+          return typeof c === 'string' ? c : (c.label || String(c));
+        }).join('|');
       }
-      await fetch('https://api.jotform.com/form/' + formId + '/questions?apiKey=' + apiKey, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: qData.toString()
+
+      jotformQuestions[String(qi + 1)] = qObj;
+    });
+
+    // 3. Creer le formulaire avec toutes les questions en une seule requete
+    const createBody = new URLSearchParams();
+    createBody.append('properties[title]', form.title || 'Formulaire R2');
+    createBody.append('properties[height]', '600');
+
+    Object.keys(jotformQuestions).forEach(function(key) {
+      var q = jotformQuestions[key];
+      Object.keys(q).forEach(function(field) {
+        createBody.append('questions[' + key + '][' + field + ']', q[field]);
       });
+    });
+
+    const createRes = await fetch('https://api.jotform.com/form?apiKey=' + apiKey, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: createBody.toString()
+    });
+
+    const createData = await createRes.json();
+    console.log('[JOTFORM] Create response code:', createData.responseCode);
+
+    if (!createRes.ok || createData.responseCode !== 200) {
+      console.error('[JOTFORM ERROR]', JSON.stringify(createData).slice(0, 300));
+      return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation formulaire JotForm: ' + (createData.message || createData.responseCode) });
     }
-    console.log('[DEPLOY] JotForm ok ' + formId);
-    res.json({ success: true, formId: formId, url: 'https://www.jotform.com/' + formId, questions: questions.length });
+
+    const formId = createData.content && createData.content.id;
+    if (!formId) return res.status(502).json({ error: 'CREATE_ERROR', message: 'ID formulaire JotForm non recu.' });
+
+    console.log('[DEPLOY] JotForm ok ' + formId + ' - ' + questions.length + ' questions');
+    res.json({ success: true, formId: formId, url: 'https://www.jotform.com/build/' + formId, questions: questions.length });
+
   } catch(err) {
     console.error('[DEPLOY JOTFORM ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
