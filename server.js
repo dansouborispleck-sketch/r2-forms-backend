@@ -626,6 +626,177 @@ app.post('/api/deploy/google', async (req, res) => {
   }
 });
 
+// ============ EXPORT EXCEL ============
+app.post('/api/deploy/excel', async (req, res) => {
+  try {
+    const { form } = req.body;
+    if (!form) return res.status(400).json({ error: 'Formulaire manquant' });
+
+    const questions = form.questions || [];
+    console.log('[EXCEL] Generation fichier - ' + questions.length + ' questions');
+
+    // Construire le workbook avec XLSX
+    const wb = XLSX.utils.book_new();
+
+    // ============ FEUILLE 1: SAISIE ============
+    const ws1Data = [];
+
+    // Grouper les questions par section
+    const groups = {};
+    const groupOrder = [];
+    questions.forEach(function(q) {
+      const g = q.group || 'Données';
+      if (!groups[g]) { groups[g] = []; groupOrder.push(g); }
+      groups[g].push(q);
+    });
+
+    // Ligne 1: titres sections + Ligne 2: noms variables
+    const sectionRow = []; // Ligne 1: noms sections
+    const varRow = [];     // Ligne 2: noms variables
+    const colMeta = [];    // Métadonnées par colonne
+
+    groupOrder.forEach(function(gname) {
+      const qs = groups[gname];
+      const startCol = varRow.length;
+      qs.forEach(function(q) {
+        const varName = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+        sectionRow.push(gname);
+        varRow.push(varName);
+        colMeta.push({ q, varName, gname, colIdx: varRow.length - 1 });
+      });
+    });
+
+    ws1Data.push(sectionRow);
+    ws1Data.push(varRow);
+
+    // Ajouter 50 lignes vides pour la saisie
+    for (var r = 0; r < 50; r++) {
+      ws1Data.push(new Array(varRow.length).fill(''));
+    }
+
+    const ws1 = XLSX.utils.aoa_to_sheet(ws1Data);
+
+    // Paramétrer les colonnes selon le type
+    // Validation des données via !dataValidation
+    if (!ws1['!dataValidation']) ws1['!dataValidation'] = [];
+
+    colMeta.forEach(function(meta) {
+      const colLetter = XLSX.utils.encode_col(meta.colIdx);
+      const t = meta.q.selectedType || meta.q.type || 'text';
+
+      // Range de saisie: de la ligne 3 à 52
+      const range = colLetter + '3:' + colLetter + '52';
+
+      if (t === 'select_one' || t === 'select_multiple') {
+        // Liste déroulante
+        const choices = (meta.q.choices || []).map(function(c) {
+          return typeof c === 'string' ? c : (c.label || String(c));
+        });
+        if (choices.length > 0) {
+          ws1['!dataValidation'].push({
+            sqref: range,
+            type: 'list',
+            formula1: '"' + choices.slice(0, 30).join(',') + '"',
+            showDropDown: false,
+            errorStyle: 'stop',
+            errorTitle: 'Valeur invalide',
+            error: 'Choisissez une valeur dans la liste'
+          });
+        }
+      } else if (t === 'integer') {
+        const dv = { sqref: range, type: 'whole', operator: 'between' };
+        if (meta.q.numMin !== '' && meta.q.numMin != null) dv.formula1 = String(meta.q.numMin);
+        else dv.formula1 = '-999999';
+        if (meta.q.numMax !== '' && meta.q.numMax != null) dv.formula2 = String(meta.q.numMax);
+        else dv.formula2 = '999999';
+        dv.errorStyle = 'stop';
+        dv.errorTitle = 'Valeur invalide';
+        dv.error = 'Entrez un nombre entier' + (meta.q.numMin != null ? ' >= ' + meta.q.numMin : '') + (meta.q.numMax != null ? ' <= ' + meta.q.numMax : '');
+        ws1['!dataValidation'].push(dv);
+      } else if (t === 'decimal') {
+        const dv = { sqref: range, type: 'decimal', operator: 'between' };
+        dv.formula1 = (meta.q.numMin !== '' && meta.q.numMin != null) ? String(meta.q.numMin) : '-999999';
+        dv.formula2 = (meta.q.numMax !== '' && meta.q.numMax != null) ? String(meta.q.numMax) : '999999';
+        dv.errorStyle = 'stop';
+        dv.errorTitle = 'Valeur invalide';
+        dv.error = 'Entrez un nombre decimal';
+        ws1['!dataValidation'].push(dv);
+      } else if (t === 'date') {
+        ws1['!dataValidation'].push({
+          sqref: range,
+          type: 'date',
+          operator: 'greaterThan',
+          formula1: '1900-01-01',
+          errorStyle: 'warning',
+          errorTitle: 'Format date',
+          error: 'Entrez une date valide'
+        });
+      }
+
+      // Largeur de colonne
+      if (!ws1['!cols']) ws1['!cols'] = [];
+      ws1['!cols'][meta.colIdx] = { wch: Math.max(15, meta.varName.length + 2) };
+    });
+
+    // Fusionner les cellules de section (ligne 1)
+    if (!ws1['!merges']) ws1['!merges'] = [];
+    var mergeStart = 0;
+    groupOrder.forEach(function(gname, gi) {
+      const count = groups[gname].length;
+      if (count > 1) {
+        ws1['!merges'].push({
+          s: { r: 0, c: mergeStart },
+          e: { r: 0, c: mergeStart + count - 1 }
+        });
+      }
+      mergeStart += count;
+    });
+
+    XLSX.utils.book_append_sheet(wb, ws1, 'Saisie');
+
+    // ============ FEUILLE 2: DICTIONNAIRE ============
+    const ws2Data = [['Variable', 'Libelle complet de la question', 'Type', 'Section', 'Obligatoire']];
+    questions.forEach(function(q) {
+      const varName = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+      const t = q.selectedType || q.type || 'text';
+      const typeLabels = {
+        select_one: 'Choix unique', select_multiple: 'Choix multiple',
+        integer: 'Nombre entier', decimal: 'Nombre decimal',
+        date: 'Date', time: 'Heure', datetime: 'Date et heure',
+        text: 'Texte libre', calculate: 'Calcul automatique',
+        geopoint: 'GPS', image: 'Photo', audio: 'Audio',
+        video: 'Video', file: 'Fichier', barcode: 'Code-barres',
+        acknowledge: 'Confirmation', rank: 'Classement', range: 'Echelle', note: 'Note'
+      };
+      ws2Data.push([
+        varName,
+        q.label || '',
+        typeLabels[t] || t,
+        q.group || 'General',
+        q.required !== false ? 'Oui' : 'Non'
+      ]);
+    });
+
+    const ws2 = XLSX.utils.aoa_to_sheet(ws2Data);
+    ws2['!cols'] = [{ wch: 20 }, { wch: 60 }, { wch: 20 }, { wch: 25 }, { wch: 12 }];
+    XLSX.utils.book_append_sheet(wb, ws2, 'Dictionnaire');
+
+    // Generer le buffer
+    const xlsxBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    const filename = (form.title || 'formulaire').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) + '_masque.xlsx';
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
+    res.send(xlsxBuffer);
+
+    console.log('[EXCEL] ok - ' + filename);
+  } catch(err) {
+    console.error('[EXCEL ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+  }
+});
+
 // ============ BUILDER KOBOTOOLBOX ============
 function buildKoboContent(form) {
   var survey = [];
