@@ -854,7 +854,7 @@ function buildKoboContent(form) {
       var name = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
       var row = { type: t, name: name, label: q.label || '', required: q.required !== false ? 'yes' : 'no', hint: q.hint || '' };
 
-      // Skip logic — verifier que les IDs references existent
+      // Skip logic — verifier que les IDs references existent et pas de cycle
       var relevant = q.relevant || '';
       if (!relevant && q.suggestions) {
         q.suggestions.forEach(function(s, si) {
@@ -862,13 +862,33 @@ function buildKoboContent(form) {
         });
       }
       if (relevant) {
-        // Verifier les references
         var refs = relevant.match(/\$\{([^}]+)\}/g) || [];
+        // 1. Verifier que tous les IDs existent
         var allValid = refs.every(function(ref) {
           return validQIds.has(ref.replace('${', '').replace('}', ''));
         });
-        if (allValid) row.relevant = relevant;
-        else console.log('[KOBO] Saut invalide ignore pour ' + name + ': ' + relevant);
+        if (!allValid) {
+          console.log('[KOBO] Saut invalide ignore pour ' + name + ': ' + relevant);
+          relevant = '';
+        }
+        // 2. Verifier pas de cycle: la question ne peut pas referencer une question qui la referencera
+        if (relevant) {
+          var refIds = refs.map(function(r) { return r.replace('${','').replace('}',''); });
+          var hasCycle = refIds.some(function(refId) {
+            // Chercher si la question referencee a elle-meme un relevant qui pointe vers la question courante
+            var refQ = (form.questions || []).find(function(qq) {
+              return (qq.id || ('q'+qq.num)).replace(/[^a-zA-Z0-9_]/g,'_') === refId;
+            });
+            if (!refQ || !refQ.relevant) return false;
+            var backRefs = (refQ.relevant.match(/\$\{([^}]+)\}/g) || []).map(function(r){ return r.replace('${','').replace('}',''); });
+            return backRefs.indexOf(name) >= 0;
+          });
+          if (hasCycle) {
+            console.log('[KOBO] Cycle detecte et supprime pour ' + name + ': ' + relevant);
+            relevant = '';
+          }
+        }
+        if (relevant) row.relevant = relevant;
       }
 
       // Constraints
