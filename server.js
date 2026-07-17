@@ -47,7 +47,10 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
     } else {
       return res.status(400).json({ error: 'FORMAT_UNSUPPORTED', message: 'Format .' + ext + ' non supporte.' });
     }
+    // Normaliser les accents et caracteres speciaux
     text = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+    // S'assurer que le texte est bien en UTF-8
+    text = Buffer.from(text, 'utf8').toString('utf8');
     if (text.length < 20)
       return res.status(422).json({ error: 'EMPTY', message: 'Fichier vide. Collez le texte directement.' });
     console.log('[IMPORT] ok ' + text.length + ' chars');
@@ -113,7 +116,7 @@ app.post('/api/analyse', async (req, res) => {
 'scale:[{"id":"A","name":"Valeur sur une echelle","type":"range","note":"Curseur"}]\n' +
 'calculate:[{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calcul"}]\n' +
 'note:[{"id":"A","name":"Message information","type":"note","note":"Sans saisie"}]\n\n' +
-'SUGGESTIONS: {"type":"skip_logic|calculate|constraint","label":"court","description":"clair","value":"formule XLSForm","confidence":"high|medium|low"}\n' +
+'SUGGESTIONS (skip_logic et constraint uniquement - PAS de calculate): {"type":"skip_logic|constraint","label":"court","description":"clair","value":"formule XLSForm","confidence":"high|medium|low"}\n' +
 'REGLES: required=true par defaut. JSON compact. choice_values=codes numeriques ["0","1",...]. Outil: ' + tool;
 
     // Traiter chaque chunk
@@ -875,7 +878,84 @@ app.post('/api/deploy/excel', async (req, res) => {
 });
 
 // ============ BUILDER KOBOTOOLBOX ============
+function fixSkipLogic(form) {
+  // Corriger les IDs de sauts invalides
+  var questions = form.questions || [];
+
+  // Construire un index des questions: id -> question, label_norm -> question
+  var idMap = {};
+  var labelMap = {};
+  questions.forEach(function(q) {
+    var id = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+    idMap[id] = q;
+    // Normaliser le label pour la recherche
+    var labelNorm = (q.label || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').slice(0, 20);
+    if (labelNorm) labelMap[labelNorm] = id;
+  });
+
+  var validIds = new Set(Object.keys(idMap));
+
+  questions.forEach(function(q) {
+    if (!q.relevant) return;
+
+    var relevant = q.relevant;
+    var refs = relevant.match(/\$\{([^}]+)\}/g) || [];
+    var needsFix = false;
+
+    refs.forEach(function(ref) {
+      var refId = ref.replace('${', '').replace('}', '');
+      if (!validIds.has(refId)) {
+        needsFix = true;
+        // Chercher la question la plus proche par similarite d'ID
+        var bestMatch = null;
+        var bestScore = 0;
+
+        // Essai 1: chercher un ID qui contient le refId ou vice versa
+        Object.keys(idMap).forEach(function(validId) {
+          if (validId.includes(refId) || refId.includes(validId)) {
+            var score = Math.min(validId.length, refId.length) / Math.max(validId.length, refId.length);
+            if (score > bestScore) { bestScore = score; bestMatch = validId; }
+          }
+        });
+
+        // Essai 2: chercher par numero si le refId contient un numero
+        if (!bestMatch || bestScore < 0.5) {
+          var numMatch = refId.match(/\d+/);
+          if (numMatch) {
+            var num = parseInt(numMatch[0]);
+            var qTarget = questions.find(function(qq) { return qq.num === num; });
+            if (qTarget) bestMatch = (qTarget.id || ('q' + qTarget.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+          }
+        }
+
+        if (bestMatch) {
+          console.log('[FIX] Saut corrige: ${' + refId + '} -> ${' + bestMatch + '}');
+          relevant = relevant.replace('${' + refId + '}', '${' + bestMatch + '}');
+        } else {
+          // Ne pas supprimer - marquer comme invalide pour signalement
+          console.log('[FIX] Saut invalide non corrigeable: ${' + refId + '} - signale a l utilisateur');
+          if (!form._invalidSkips) form._invalidSkips = [];
+          form._invalidSkips.push({
+            questionId: q.id,
+            questionLabel: q.label,
+            invalidRef: refId,
+            formula: q.relevant
+          });
+          // Laisser le relevant intact pour que l utilisateur puisse le voir et decider
+        }
+      }
+    });
+
+    if (needsFix) q.relevant = relevant;
+  });
+
+  return form;
+}
+
 function buildKoboContent(form) {
+  form = fixSkipLogic(form);
   var survey = [];
   var choices = [];
   var seen = new Set();
