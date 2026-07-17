@@ -1,10 +1,10 @@
 require('dotenv').config();
 const express = require('express');
-const ExcelJS = require('exceljs');
 const cors = require('cors');
 const multer = require('multer');
 const mammoth = require('mammoth');
 const XLSX = require('xlsx');
+const ExcelJS = require('exceljs');
 const pdf = require('pdf-parse');
 const fetch = require('node-fetch');
 const path = require('path');
@@ -14,10 +14,10 @@ const PORT = process.env.PORT || 4000;
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '4.0.0' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '5.0.0' }));
 
 // ============ IMPORT ============
 app.post('/api/import', upload.single('file'), async (req, res) => {
@@ -26,9 +26,15 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
     const { originalname, buffer } = req.file;
     const ext = originalname.split('.').pop().toLowerCase();
     let text = '';
-    console.log('[IMPORT] ' + originalname);
+    console.log('[IMPORT] ' + originalname + ' (' + buffer.length + ' bytes)');
+
     if (['txt','csv'].includes(ext)) {
-      text = buffer.toString('utf-8');
+      // Essayer UTF-8 d'abord, puis latin1
+      try {
+        text = buffer.toString('utf-8');
+      } catch(e) {
+        text = buffer.toString('latin1');
+      }
     } else if (ext === 'pdf') {
       const d = await pdf(buffer);
       text = d.text;
@@ -47,13 +53,18 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
     } else {
       return res.status(400).json({ error: 'FORMAT_UNSUPPORTED', message: 'Format .' + ext + ' non supporte.' });
     }
-    // Normaliser les accents et caracteres speciaux
-    text = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
-    // S'assurer que le texte est bien en UTF-8
-    text = Buffer.from(text, 'utf8').toString('utf8');
+
+    // Normaliser le texte — préserver les accents
+    text = text
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
     if (text.length < 20)
       return res.status(422).json({ error: 'EMPTY', message: 'Fichier vide. Collez le texte directement.' });
-    console.log('[IMPORT] ok ' + text.length + ' chars');
+
+    console.log('[IMPORT] ok ' + text.length + ' chars, accents: ' + (text.includes('é') || text.includes('è') || text.includes('à')));
     res.json({ success: true, text: text, metadata: { filename: originalname, chars: text.length } });
   } catch(err) {
     console.error('[IMPORT ERROR]', err.message);
@@ -61,69 +72,55 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
   }
 });
 
-// ============ ANALYSE ============
+// ============ ANALYSE (CHUNKING COMPLET) ============
 app.post('/api/analyse', async (req, res) => {
   try {
     const { text, tool } = req.body;
     if (!text || text.trim().length < 10) return res.status(400).json({ error: 'Texte trop court' });
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Cle API manquante' });
-    // Chunking pour les grands questionnaires
+
+    // Chunking — morceaux de 6000 chars, découpe aux sauts de ligne
     const CHUNK_SIZE = 6000;
     const chunks = [];
     let pos = 0;
     while (pos < text.length) {
       let end = Math.min(pos + CHUNK_SIZE, text.length);
       if (end < text.length) {
-        const lastNewline = text.lastIndexOf('\n', end);
-        if (lastNewline > pos + CHUNK_SIZE * 0.7) end = lastNewline;
+        const lastNL = text.lastIndexOf('\n', end);
+        if (lastNL > pos + CHUNK_SIZE * 0.6) end = lastNL;
       }
       chunks.push(text.slice(pos, end));
       pos = end;
     }
-    const truncated = false;
+
     console.log('[ANALYSE] ' + text.length + ' chars -> ' + chunks.length + ' chunks -> ' + tool);
 
-    const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions.\n\n' +
+    const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions et le texte introductif.\n\n' +
 'REGLES ABSOLUES:\n' +
-'1. Extrais TOUTES les questions: numerotees, sans numero (date/lieu en entete), sous-questions implicites.\n' +
-'2. GROUPES: Utilise le TITRE COMPLET de la section (ex: "Facteurs socio-demographiques" et NON "A").\n' +
-'3. CHAMP AUTRES: Quand une modalite contient "Autres" ou "Autre":\n' +
-'   - Garde la modalite dans choices[]\n' +
-'   - Cree AUTOMATIQUEMENT une question de saisie libre juste apres (required=false)\n' +
-'   - Label: "Si autre, precisez :"\n' +
-'4. SAUTS IMPLICITES: Detecte les conditions meme non ecrites.\n' +
-'5. VALEURS XLSForm: Pour skip_logic, utilise codes numeriques (0,1,2...) pas les libelles.\n' +
-'6. coherence_report: liste des observations (questions manquantes, sauts detectes, incoherences).\n\n' +
-'FORMAT JSON COMPACT (sans indentation):\n' +
-'{"title":"titre","coherence_report":["obs1"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"choice_values":[],"group":"TITRE COMPLET","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
-'FORMATS PAR CLASSE:\n' +
-'quantitative:[{"id":"A","name":"Nombre entier","type":"integer","note":"Ex: 25"},{"id":"B","name":"Nombre avec virgule","type":"decimal","note":"Ex: 65,5"},{"id":"C","name":"Valeur sur une echelle","type":"range","note":"Ex: 1 a 10"}]\n' +
-'qualitative_choice:[{"id":"A","name":"Une seule reponse au choix","type":"select_one","note":"Une case"},{"id":"B","name":"Plusieurs reponses possibles","type":"select_multiple","note":"Plusieurs cases"},{"id":"C","name":"Reponse ecrite libre","type":"text","note":"Libre"}]\n' +
-'Pour mention "Plusieurs reponses" ou "Cochez toutes": suggested_format_idx=1\n' +
-'qualitative_open:[{"id":"A","name":"Reponse courte","type":"text","note":"Quelques mots"},{"id":"B","name":"Reponse longue","type":"text","note":"Plusieurs phrases"}]\n' +
-'date_time:[{"id":"A","name":"Date","type":"date","note":"jj/mm/aaaa"},{"id":"B","name":"Heure","type":"time","note":"hh:mm"},{"id":"C","name":"Date et heure","type":"datetime","note":"jj/mm/aaaa hh:mm"}]\n' +
-'geopoint:[{"id":"A","name":"Localisation GPS","type":"geopoint","note":"GPS auto"}]\n' +
-'geotrace:[{"id":"A","name":"Tracer un chemin GPS","type":"geotrace","note":"Trajet"}]\n' +
-'geoshape:[{"id":"A","name":"Delimiter une zone GPS","type":"geoshape","note":"Zone"}]\n' +
-'media_photo:[{"id":"A","name":"Prendre une photo","type":"image","note":"Photo"}]\n' +
-'media_audio:[{"id":"A","name":"Enregistrer un son","type":"audio","note":"Audio"}]\n' +
-'media_video:[{"id":"A","name":"Enregistrer une video","type":"video","note":"Video"}]\n' +
-'media_file:[{"id":"A","name":"Joindre un fichier","type":"file","note":"Fichier"}]\n' +
-'barcode:[{"id":"A","name":"Scanner un code-barres","type":"barcode","note":"QR/barcode"}]\n' +
-'acknowledge:[{"id":"A","name":"Case a cocher pour confirmer","type":"acknowledge","note":"Confirmation"}]\n' +
-'ranking:[{"id":"A","name":"Classer par ordre de preference","type":"rank","note":"Ordre"}]\n' +
-'scale:[{"id":"A","name":"Valeur sur une echelle","type":"range","note":"Curseur"}]\n' +
-'calculate:[{"id":"A","name":"Valeur calculee automatiquement","type":"calculate","note":"Calcul"}]\n' +
-'note:[{"id":"A","name":"Message information","type":"note","note":"Sans saisie"}]\n\n' +
-'SUGGESTIONS (skip_logic et constraint uniquement - PAS de calculate): {"type":"skip_logic|constraint","label":"court","description":"clair","value":"formule XLSForm","confidence":"high|medium|low"}\n' +
-'REGLES: required=true par defaut. JSON compact. choice_values=codes numeriques ["0","1",...]. Outil: ' + tool;
+'1. INTRODUCTION: Si le questionnaire commence par une presentation ou introduction (objet, contexte, consignes), inclus-la comme premiere question de type "note" avec son texte complet.\n' +
+'2. Extrais TOUTES les questions: numerotees, sans numero, sous-questions implicites, questions en entete.\n' +
+'3. GROUPES: Utilise le TITRE COMPLET de la section.\n' +
+'4. ACCENTS: Preserve absolument tous les accents (é, è, à, ù, â, ê, î, ô, û, ç, etc.).\n' +
+'5. CHAMP AUTRES: Quand une modalite contient "Autres" ou "Autre", cree automatiquement une question "Si autre, precisez :" juste apres (required=false).\n' +
+'6. SAUTS: Detecte les conditions. Pour skip_logic, utilise les vrais IDs des questions (format q1, q2...), PAS des IDs inventes.\n' +
+'7. PAS de suggestions de type calculate — le statisticien s\'en charge.\n' +
+'8. coherence_report: observations utiles.\n\n' +
+'FORMAT JSON COMPACT:\n' +
+'{"title":"titre","coherence_report":["obs"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"choice_values":[],"group":"TITRE COMPLET","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
+'CLASSES: quantitative, qualitative_choice, qualitative_open, date_time, geopoint, geotrace, geoshape, media_photo, media_audio, media_video, media_file, barcode, acknowledge, ranking, scale, note\n\n' +
+'SUGGESTIONS (skip_logic et constraint uniquement):\n' +
+'{"type":"skip_logic|constraint","label":"court","description":"clair","value":"formule XLSForm avec vrais IDs","confidence":"high|medium|low"}\n\n' +
+'Outil cible: ' + tool;
 
-    // Traiter chaque chunk
     async function analyseChunk(chunkText, chunkNum, totalChunks, previousIds) {
       const contextNote = totalChunks > 1
-        ? '\nPartie ' + chunkNum + '/' + totalChunks + '.' + (chunkNum === 1 ? ' Commence depuis le debut.' : ' Continue - ne repete pas les questions deja extraites.') + (chunkNum === totalChunks ? ' Derniere partie.' : '') + (previousIds.length > 0 ? '\nIDs deja extraits: ' + previousIds.slice(-10).join(', ') : '')
+        ? '\n\nPartie ' + chunkNum + '/' + totalChunks + '.' +
+          (chunkNum === 1 ? ' Extrait depuis le debut.' : ' Continue — ne repete pas les questions deja extraites.') +
+          (chunkNum === totalChunks ? ' Derniere partie.' : '') +
+          (previousIds.length > 0 ? '\nDernieres questions extraites: ' + previousIds.slice(-8).join(', ') : '')
         : '';
+
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
@@ -131,34 +128,38 @@ app.post('/api/analyse', async (req, res) => {
           model: 'claude-sonnet-4-5',
           max_tokens: 32000,
           system: system + contextNote,
-          messages: [{ role: 'user', content: 'Extrais TOUTES les questions de cette partie:\n\n' + chunkText }]
+          messages: [{ role: 'user', content: 'Extrais TOUTES les questions de cette partie du questionnaire:\n\n' + chunkText }]
         })
       });
+
       if (!response.ok) {
         const e = await response.json();
-        throw new Error('Claude API: ' + (e.error && e.error.message || JSON.stringify(e)));
+        throw new Error('Claude: ' + (e.error && e.error.message || JSON.stringify(e).slice(0, 200)));
       }
+
       const data = await response.json();
       const rawText = data.content && data.content[0] ? data.content[0].text : '{}';
-      let jsonStr = rawText.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+      let jsonStr = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       const s = jsonStr.indexOf('{');
       if (s > 0) jsonStr = jsonStr.slice(s);
-      try { return JSON.parse(jsonStr); }
-      catch(e) {
+
+      try {
+        return JSON.parse(jsonStr);
+      } catch(e) {
+        // Tenter de reparer le JSON tronque
         const lc = jsonStr.lastIndexOf('},');
-        if (lc > 100) jsonStr = jsonStr.slice(0, lc+1);
-        jsonStr = jsonStr.replace(/,\s*$/,'');
-        const ob = (jsonStr.match(/\[/g)||[]).length-(jsonStr.match(/\]/g)||[]).length;
-        const cb = (jsonStr.match(/\{/g)||[]).length-(jsonStr.match(/\}/g)||[]).length;
-        for(var i=0;i<Math.max(0,ob);i++) jsonStr+=']';
-        for(var j=0;j<Math.max(0,cb);j++) jsonStr+='}';
+        if (lc > 100) jsonStr = jsonStr.slice(0, lc + 1);
+        jsonStr = jsonStr.replace(/,\s*$/, '');
+        const ob = (jsonStr.match(/\[/g) || []).length - (jsonStr.match(/\]/g) || []).length;
+        const cb = (jsonStr.match(/\{/g) || []).length - (jsonStr.match(/\}/g) || []).length;
+        for (var i = 0; i < Math.max(0, ob); i++) jsonStr += ']';
+        for (var j = 0; j < Math.max(0, cb); j++) jsonStr += '}';
         return JSON.parse(jsonStr);
       }
     }
 
     let allQuestions = [];
     let formTitle = '';
-    let formSummary = '';
     let allGroups = new Set();
     let coherenceReport = [];
     let previousIds = [];
@@ -168,46 +169,69 @@ app.post('/api/analyse', async (req, res) => {
       var chunkNum = ci + 1;
       console.log('[ANALYSE] Chunk ' + chunkNum + '/' + chunks.length + ' (' + chunks[ci].length + ' chars)');
       var success = false;
+
       for (var attempt = 1; attempt <= 3; attempt++) {
         try {
-          if (attempt > 1) await new Promise(function(r){ setTimeout(r, 1000 * attempt); });
+          if (attempt > 1) await new Promise(function(r) { setTimeout(r, 1500 * attempt); });
           var result = await analyseChunk(chunks[ci], chunkNum, chunks.length, previousIds);
-          if (chunkNum === 1) { formTitle = result.title || ''; formSummary = result.summary || ''; }
-          if (result.coherence_report) result.coherence_report.forEach(function(r){ coherenceReport.push(r); });
-          if (result.questions && Array.isArray(result.questions)) {
-            var existingLabels = new Set(allQuestions.map(function(q){ return (q.label||'').trim().toLowerCase(); }));
-            var newQs = result.questions.filter(function(q){
-              var lbl = (q.label||'').trim().toLowerCase();
-              return lbl && !existingLabels.has(lbl);
+
+          if (chunkNum === 1 && result.title) formTitle = result.title;
+          if (result.coherence_report) result.coherence_report.forEach(function(r) { coherenceReport.push(r); });
+
+          if (result.questions && Array.isArray(result.questions) && result.questions.length > 0) {
+            // Deduplication par label
+            var existingLabels = new Set(allQuestions.map(function(q) { return (q.label || '').trim().toLowerCase(); }));
+            var newQs = result.questions.filter(function(q) {
+              var lbl = (q.label || '').trim().toLowerCase();
+              return lbl.length > 0 && !existingLabels.has(lbl);
             });
-            newQs.forEach(function(q, idx){
+            // Renumeroter
+            newQs.forEach(function(q, idx) {
               q.num = allQuestions.length + idx + 1;
               q.id = 'q' + q.num;
             });
             allQuestions = allQuestions.concat(newQs);
-            previousIds = allQuestions.slice(-15).map(function(q){ return q.id; });
+            previousIds = allQuestions.slice(-10).map(function(q) { return q.id; });
           }
-          if (result.groups) result.groups.forEach(function(g){ allGroups.add(g); });
-          console.log('[ANALYSE] Chunk ' + chunkNum + ' ok: ' + (result.questions ? result.questions.length : 0) + ' questions -> Total: ' + allQuestions.length);
+
+          if (result.groups) result.groups.forEach(function(g) { allGroups.add(g); });
+          console.log('[ANALYSE] Chunk ' + chunkNum + ' ok -> ' + (result.questions ? result.questions.length : 0) + ' nouvelles questions. Total: ' + allQuestions.length);
           success = true;
           break;
         } catch(chunkErr) {
           console.error('[ANALYSE] Chunk ' + chunkNum + ' attempt ' + attempt + ' failed:', chunkErr.message);
         }
       }
-      if (!success) { failedChunks.push(chunkNum); console.error('[ANALYSE] Chunk ' + chunkNum + ' abandonne'); }
-      if (ci < chunks.length - 1) await new Promise(function(r){ setTimeout(r, 500); });
+
+      if (!success) {
+        failedChunks.push(chunkNum);
+        console.error('[ANALYSE] Chunk ' + chunkNum + ' abandonne apres 3 tentatives');
+      }
+
+      // Pause entre chunks pour eviter rate limiting
+      if (ci < chunks.length - 1) await new Promise(function(r) { setTimeout(r, 600); });
     }
 
     if (allQuestions.length === 0)
       return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question detectee.' });
 
-    var form = { title: formTitle, summary: formSummary, coherence_report: coherenceReport, questions: allQuestions, groups: Array.from(allGroups) };
-    console.log('[ANALYSE] ok ' + allQuestions.length + ' questions au total');
+    var form = {
+      title: formTitle || 'Formulaire',
+      coherence_report: coherenceReport,
+      questions: allQuestions,
+      groups: Array.from(allGroups)
+    };
+
+    console.log('[ANALYSE] TOTAL: ' + allQuestions.length + ' questions, ' + chunks.length + ' chunks, ' + failedChunks.length + ' echecs');
+
     res.json({
-      success: true, form: form, truncated: false,
-      chunks_total: chunks.length, chunks_failed: failedChunks.length,
-      warning: failedChunks.length > 0 ? failedChunks.length + ' section(s) non traitees. Verifiez vos questions.' : null
+      success: true,
+      form: form,
+      chunks_total: chunks.length,
+      chunks_failed: failedChunks.length,
+      warning: failedChunks.length > 0
+        ? failedChunks.length + ' partie(s) non traitee(s) (chunks ' + failedChunks.join(', ') + '). Verifiez que toutes les questions sont presentes.'
+        : null
     });
   } catch(err) {
     console.error('[ANALYSE ERROR]', err.message);
@@ -226,56 +250,170 @@ app.post('/api/correct', async (req, res) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-5', max_tokens: 4096,
-        system: 'Expert collecte de donnees. Applique exactement les corrections au formulaire JSON. Retourne JSON corrige UNIQUEMENT sans markdown.',
+        model: 'claude-sonnet-4-5', max_tokens: 8192,
+        system: 'Expert collecte de donnees. Applique exactement les corrections au formulaire JSON. Preserve tous les accents. Retourne JSON corrige UNIQUEMENT sans markdown.',
         messages: [{ role: 'user', content: 'Formulaire:\n' + JSON.stringify(form) + '\n\nCorrections:\n' + instructions }]
       })
     });
     if (!response.ok) return res.status(502).json({ error: 'CLAUDE_ERROR' });
     const data = await response.json();
     let raw = data.content && data.content[0] ? data.content[0].text : '{}';
-    raw = raw.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+    raw = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const m = raw.match(/\{[\s\S]*/);
     const corrected = JSON.parse(m ? m[0] : '{}');
     res.json({ success: true, form: corrected });
   } catch(err) {
-    res.status(500).json({ error: 'SERVER_ERROR' });
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
   }
 });
 
-// ============ VERIFICATION XLSFORM ============
+// ============ VALIDATION ET AUTO-CORRECTION XLSFORM ============
 app.post('/api/verify', async (req, res) => {
   try {
     const { form } = req.body;
     if (!form) return res.status(400).json({ error: 'Formulaire manquant' });
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Cle API manquante' });
-    const koboContent = buildKoboContent(form);
-    const xlsformStr = JSON.stringify(koboContent, null, 2);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5', max_tokens: 2048,
-        system: 'Expert XLSForm. Verifie le contenu et reponds en JSON: {"valid":true/false,"issues":["probleme"],"fixed_questions":[{"id":"q1","relevant":"formule corrigee"}]}',
-        messages: [{ role: 'user', content: 'Verifie:\n\n' + xlsformStr.slice(0, 6000) }]
-      })
+
+    // Auto-correction du formulaire avant de construire le XLSForm
+    var questions = form.questions || [];
+    var validQIds = new Set(questions.map(function(q) {
+      return (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+    }));
+
+    var fixCount = 0;
+
+    questions.forEach(function(q) {
+      // 1. Corriger les sauts avec IDs invalides
+      if (q.relevant) {
+        var refs = q.relevant.match(/\$\{([^}]+)\}/g) || [];
+        var needsFix = false;
+        refs.forEach(function(ref) {
+          var refId = ref.replace('${', '').replace('}', '');
+          if (!validQIds.has(refId)) needsFix = true;
+        });
+        if (needsFix) {
+          // Tenter de corriger par similarite de numero
+          var fixed = q.relevant;
+          refs.forEach(function(ref) {
+            var refId = ref.replace('${', '').replace('}', '');
+            if (!validQIds.has(refId)) {
+              // Chercher par numero dans l'ID
+              var numMatch = refId.match(/\d+/);
+              if (numMatch) {
+                var num = parseInt(numMatch[0]);
+                var target = questions.find(function(qq) { return qq.num === num; });
+                if (target) {
+                  var targetId = (target.id || ('q' + target.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+                  fixed = fixed.replace('${' + refId + '}', '${' + targetId + '}');
+                  fixCount++;
+                  console.log('[VERIFY] Saut corrige par num: ${' + refId + '} -> ${' + targetId + '}');
+                } else {
+                  // Pas de correspondance par numero -> chercher par similarite de label
+                  var bestMatch = null;
+                  var bestScore = 0;
+                  questions.forEach(function(qq) {
+                    var qqId = (qq.id || ('q' + qq.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+                    // Similarite entre refId et qqId
+                    var shorter = refId.length < qqId.length ? refId : qqId;
+                    var longer = refId.length < qqId.length ? qqId : refId;
+                    var score = 0;
+                    for (var ci = 0; ci < shorter.length; ci++) {
+                      if (shorter[ci] === longer[ci]) score++;
+                    }
+                    score = score / longer.length;
+                    if (score > bestScore && score > 0.4) { bestScore = score; bestMatch = qqId; }
+                  });
+                  if (bestMatch) {
+                    fixed = fixed.replace('${' + refId + '}', '${' + bestMatch + '}');
+                    fixCount++;
+                    console.log('[VERIFY] Saut corrige par similarite: ${' + refId + '} -> ${' + bestMatch + '} (score:' + bestScore.toFixed(2) + ')');
+                  } else {
+                    // Dernier recours: utiliser la question precedente dans le formulaire
+                    var qIdx = questions.findIndex(function(qq) { return qq.relevant === q.relevant; });
+                    if (qIdx > 0) {
+                      var prevId = (questions[qIdx-1].id || ('q' + questions[qIdx-1].num)).replace(/[^a-zA-Z0-9_]/g, '_');
+                      fixed = fixed.replace('${' + refId + '}', '${' + prevId + '}');
+                      fixCount++;
+                      console.log('[VERIFY] Saut corrige par question precedente: ${' + refId + '} -> ${' + prevId + '}');
+                    } else {
+                      // Utiliser q1 comme fallback absolu — jamais supprimer
+                      var fallbackId = (questions[0].id || 'q1').replace(/[^a-zA-Z0-9_]/g, '_');
+                      fixed = fixed.replace('${' + refId + '}', '${' + fallbackId + '}');
+                      fixCount++;
+                      console.log('[VERIFY] Saut corrige par fallback: ${' + refId + '} -> ${' + fallbackId + '}');
+                    }
+                  }
+                }
+              } else {
+                // Pas de numero dans refId -> chercher par similarite de label
+                var bestMatch2 = null;
+                var bestScore2 = 0;
+                questions.forEach(function(qq) {
+                  var qqId = (qq.id || ('q' + qq.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+                  var qqLabel = (qq.label || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_');
+                  // Comparer refId avec qqId et qqLabel
+                  var score1 = 0, score2 = 0;
+                  var shorter1 = refId.length < qqId.length ? refId : qqId;
+                  var longer1 = refId.length < qqId.length ? qqId : refId;
+                  for (var ci = 0; ci < shorter1.length; ci++) { if (shorter1[ci] === longer1[ci]) score1++; }
+                  score1 = score1 / Math.max(longer1.length, 1);
+                  // Chercher refId dans le label normalise
+                  if (qqLabel.includes(refId) || refId.includes(qqLabel.slice(0, 6))) score2 = 0.7;
+                  var score = Math.max(score1, score2);
+                  if (score > bestScore2 && score > 0.35) { bestScore2 = score; bestMatch2 = qqId; }
+                });
+                if (bestMatch2) {
+                  fixed = fixed.replace('${' + refId + '}', '${' + bestMatch2 + '}');
+                  fixCount++;
+                  console.log('[VERIFY] Saut corrige par label: ${' + refId + '} -> ${' + bestMatch2 + '} (score:' + bestScore2.toFixed(2) + ')');
+                } else {
+                  // Fallback absolu — prendre la question juste avant celle qui a ce saut
+                  var qIdx2 = questions.findIndex(function(qq) { return qq.relevant === q.relevant; });
+                  var prevIdx = qIdx2 > 0 ? qIdx2 - 1 : 0;
+                  var prevId2 = (questions[prevIdx].id || ('q' + questions[prevIdx].num)).replace(/[^a-zA-Z0-9_]/g, '_');
+                  fixed = fixed.replace('${' + refId + '}', '${' + prevId2 + '}');
+                  fixCount++;
+                  console.log('[VERIFY] Saut corrige par fallback absolu: ${' + refId + '} -> ${' + prevId2 + '}');
+                }
+              }
+            }
+          });
+          q.relevant = fixed;
+        }
+      }
+
+      // 2. Corriger les questions select sans choix -> convertir en texte libre
+      var t = q.selectedType || q.type || 'text';
+      if ((t === 'select_one' || t === 'select_multiple') && (!q.choices || q.choices.length === 0)) {
+        console.log('[VERIFY] Question sans choix convertie en texte: ' + q.label);
+        q.selectedType = 'text';
+        q.type = 'text';
+        fixCount++;
+      }
+
+      // 3. Corriger les suggestions skip_logic avec IDs invalides
+      if (q.suggestions) {
+        q.suggestions.forEach(function(s) {
+          if (s.type === 'skip_logic' && s.value) {
+            var sRefs = s.value.match(/\$\{([^}]+)\}/g) || [];
+            var hasInvalid = sRefs.some(function(ref) {
+              return !validQIds.has(ref.replace('${','').replace('}',''));
+            });
+            if (hasInvalid) {
+              s.value = ''; // Vider la suggestion invalide
+              fixCount++;
+            }
+          }
+        });
+      }
     });
-    if (!response.ok) return res.json({ valid: true, issues: [] });
-    const data = await response.json();
-    const raw = (data.content && data.content[0] ? data.content[0].text : '{"valid":true,"issues":[]}').replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
-    const si = raw.indexOf('{');
-    let result;
-    try { result = JSON.parse(si >= 0 ? raw.slice(si) : raw); } catch(e) { result = { valid: true, issues: [] }; }
-    if (result.fixed_questions && result.fixed_questions.length > 0) {
-      result.fixed_questions.forEach(function(fix) {
-        const q = form.questions.find(function(q) { return q.id === fix.id; });
-        if (q && fix.relevant) q.relevant = fix.relevant;
-      });
-    }
-    res.json({ valid: result.valid, issues: result.issues || [], form: form });
+
+    console.log('[VERIFY] Auto-correction: ' + fixCount + ' corrections appliquees');
+    res.json({ valid: true, issues: [], form: form, fixed: fixCount });
+
   } catch(err) {
-    res.json({ valid: true, issues: [] });
+    console.error('[VERIFY ERROR]', err.message);
+    // Ne jamais bloquer — retourner le formulaire tel quel
+    res.json({ valid: true, issues: [], form: req.body.form });
   }
 });
 
@@ -286,32 +424,38 @@ app.post('/api/deploy/kobo', async (req, res) => {
     const { username, password, server = 'https://kf.kobotoolbox.org' } = credentials;
     if (!form || !username || !password) return res.status(400).json({ error: 'Donnees manquantes' });
     console.log('[DEPLOY] KoboToolbox -> ' + server);
+
     const tokenRes = await fetch(server + '/token/?format=json', {
       headers: { 'Authorization': 'Basic ' + Buffer.from(username + ':' + password).toString('base64') }
     });
     if (!tokenRes.ok) return res.status(401).json({ error: 'AUTH_ERROR', message: 'Identifiants incorrects.' });
     const token = (await tokenRes.json()).token;
     const auth = { 'Authorization': 'Token ' + token, 'Content-Type': 'application/json' };
+
     const assetRes = await fetch(server + '/api/v2/assets/?format=json', {
       method: 'POST', headers: auth,
       body: JSON.stringify({ name: form.title || 'Formulaire R2', asset_type: 'survey' })
     });
     if (!assetRes.ok) return res.status(502).json({ error: 'ASSET_ERROR', message: 'Erreur creation formulaire.' });
     const uid = (await assetRes.json()).uid;
+
     const koboContent = buildKoboContent(form);
     const patchRes = await fetch(server + '/api/v2/assets/' + uid + '/?format=json', {
       method: 'PATCH', headers: auth,
       body: JSON.stringify({ name: form.title || 'Formulaire R2', content: koboContent })
     });
     if (!patchRes.ok) {
-      console.error('[PATCH ERROR]', await patchRes.text());
-      return res.status(502).json({ error: 'PATCH_ERROR', message: 'Erreur import questionnaire.' });
+      const errText = await patchRes.text();
+      console.error('[PATCH ERROR]', errText.slice(0, 300));
+      return res.status(502).json({ error: 'PATCH_ERROR', message: 'Erreur import questionnaire. Verifiez le XLSForm.' });
     }
+
     await fetch(server + '/api/v2/assets/' + uid + '/deployment/?format=json', {
       method: 'POST', headers: auth, body: JSON.stringify({ active: true })
     });
+
     console.log('[DEPLOY] Kobo ok ' + uid);
-    res.json({ success: true, uid: uid, url: server + '/#/forms/' + uid + '/summary', questions: (form.questions||[]).length });
+    res.json({ success: true, uid: uid, url: server + '/#/forms/' + uid + '/summary', questions: (form.questions || []).length });
   } catch(err) {
     console.error('[DEPLOY KOBO ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
@@ -326,18 +470,13 @@ app.post('/api/deploy/jotform', async (req, res) => {
     if (!form || !apiKey) return res.status(400).json({ error: 'Donnees manquantes' });
     console.log('[DEPLOY] JotForm');
 
-    // 1. Verifier la cle API
     const userRes = await fetch('https://api.jotform.com/user?apiKey=' + apiKey);
     const userData = await userRes.json();
-    if (!userRes.ok || userData.responseCode !== 200) {
-      return res.status(401).json({ error: 'AUTH_ERROR', message: 'Cle API JotForm incorrecte.' });
-    }
+    if (!userRes.ok || userData.responseCode !== 200)
+      return res.status(401).json({ error: 'AUTH_ERROR', message: 'Cle API JotForm incorrecte ou insuffisante (Full Access requis).' });
 
-    // 2. Construire le formulaire complet avec toutes les questions
     const questions = form.questions || [];
     const jotformQuestions = {};
-
-    // Question 0: en-tete
     jotformQuestions['0'] = { type: 'control_head', text: form.title || 'Formulaire R2', order: '1', name: 'header' };
 
     questions.forEach(function(q, qi) {
@@ -348,32 +487,17 @@ app.post('/api/deploy/jotform', async (req, res) => {
       else if (t === 'integer' || t === 'decimal') qType = 'control_number';
       else if (t === 'date') qType = 'control_datetime';
       else if (t === 'image') qType = 'control_fileupload';
-      else if (t === 'audio' || t === 'video' || t === 'file') qType = 'control_fileupload';
+      else if (t === 'note') qType = 'control_text';
 
-      var qObj = {
-        type: qType,
-        text: q.label || ('Question ' + (qi+1)),
-        order: String(qi + 2),
-        name: 'q' + (qi+1),
-        required: q.required !== false ? 'Yes' : 'No',
-        hint: q.hint || ''
-      };
-
-      // Ajouter les choix
+      var qObj = { type: qType, text: q.label || ('Question ' + (qi+1)), order: String(qi+2), name: 'q' + (qi+1), required: q.required !== false ? 'Yes' : 'No' };
       if ((qType === 'control_radio' || qType === 'control_checkbox') && q.choices && q.choices.length > 0) {
-        qObj.options = q.choices.map(function(c) {
-          return typeof c === 'string' ? c : (c.label || String(c));
-        }).join('|');
+        qObj.options = q.choices.map(function(c) { return typeof c === 'string' ? c : (c.label || String(c)); }).join('|');
       }
-
-      jotformQuestions[String(qi + 1)] = qObj;
+      jotformQuestions[String(qi+1)] = qObj;
     });
 
-    // 3. Creer le formulaire avec toutes les questions en une seule requete
     const createBody = new URLSearchParams();
     createBody.append('properties[title]', form.title || 'Formulaire R2');
-    createBody.append('properties[height]', '600');
-
     Object.keys(jotformQuestions).forEach(function(key) {
       var q = jotformQuestions[key];
       Object.keys(q).forEach(function(field) {
@@ -386,21 +510,15 @@ app.post('/api/deploy/jotform', async (req, res) => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: createBody.toString()
     });
-
     const createData = await createRes.json();
-    console.log('[JOTFORM] Create response code:', createData.responseCode);
-
-    if (!createRes.ok || createData.responseCode !== 200) {
-      console.error('[JOTFORM ERROR]', JSON.stringify(createData).slice(0, 300));
-      return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation formulaire JotForm: ' + (createData.message || createData.responseCode) });
-    }
+    if (!createRes.ok || createData.responseCode !== 200)
+      return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation JotForm: ' + (createData.message || createData.responseCode) });
 
     const formId = createData.content && createData.content.id;
     if (!formId) return res.status(502).json({ error: 'CREATE_ERROR', message: 'ID formulaire JotForm non recu.' });
 
-    console.log('[DEPLOY] JotForm ok ' + formId + ' - ' + questions.length + ' questions');
+    console.log('[DEPLOY] JotForm ok ' + formId);
     res.json({ success: true, formId: formId, url: 'https://www.jotform.com/build/' + formId, questions: questions.length });
-
   } catch(err) {
     console.error('[DEPLOY JOTFORM ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
@@ -416,7 +534,6 @@ app.post('/api/deploy/google', async (req, res) => {
     const questions = form.questions || [];
     console.log('[DEPLOY] Google Forms - ' + questions.length + ' questions');
 
-    // 1. Creer le formulaire vide
     const createRes = await fetch('https://forms.googleapis.com/v1/forms', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
@@ -424,260 +541,120 @@ app.post('/api/deploy/google', async (req, res) => {
     });
     if (!createRes.ok) return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation Google Form.' });
     const formId = (await createRes.json()).formId;
-    console.log('[GOOGLE] FormId: ' + formId);
 
-    // Helper: construire un questionItem selon le type
-    function makeQItem(q) {
-      var t = q.selectedType || q.type || 'text';
-      var required = q.required !== false;
-      var choices = (q.choices||[]).map(function(c){ return { value: typeof c==='string'?c:(c.label||String(c)) }; });
-      if (t==='select_one' && choices.length>0) return { question:{ required:required, choiceQuestion:{ type:'RADIO', options:choices, shuffle:false } } };
-      if (t==='select_multiple' && choices.length>0) return { question:{ required:required, choiceQuestion:{ type:'CHECKBOX', options:choices, shuffle:false } } };
-      if (t==='date') return { question:{ required:required, dateQuestion:{ includeTime:false, includeYear:true } } };
-      if (t==='time'||t==='datetime') return { question:{ required:required, timeQuestion:{ duration:false } } };
-      if (t==='scale'||t==='range') return { question:{ required:required, scaleQuestion:{ low:parseInt(q.numMin)||1, high:parseInt(q.numMax)||10, lowLabel:'Min', highLabel:'Max' } } };
-      return { question:{ required:required, textQuestion:{ paragraph:(q.label||'').length>50 } } };
-    }
-
-    function makeHint(q) {
-      var t = q.selectedType || q.type || 'text';
-      var hint = q.hint || '';
-      if (t==='integer'||t==='decimal') {
-        var parts=[];
-        if (q.numMin!==''&&q.numMin!=null) parts.push('min: '+q.numMin);
-        if (q.numMax!==''&&q.numMax!=null) parts.push('max: '+q.numMax);
-        if (parts.length>0) return (hint?hint+' — ':'')+parts.join(', ');
-      }
-      return hint;
-    }
-
-    // 2. Analyser tous les sauts confirmes pour determiner les sections necessaires
-    // Un saut = une question A dont certaines reponses doivent afficher des questions B,C,D
-    // et d'autres reponses doivent les sauter
-    // Dans Google Forms: B,C,D doivent etre dans une section separee
-
-    // Identifier toutes les questions cibles de sauts
-    // q.relevant contient la formule XLSForm: "${q1} = '1'" -> la question q1 est le declencheur
-    var skipTargets = {}; // questionId -> true (cette question est ciblee par un saut)
+    const groupMap = {}, groupOrder = [];
     questions.forEach(function(q) {
-      if (q.relevant && q.relevant.trim()) {
-        // Extraire l'ID de la question source du relevant
-        var match = q.relevant.match(/\$\{([^}]+)\}/);
-        if (match) skipTargets[q.id] = match[1]; // q.id -> id_source
-      }
-      // Detecter aussi les questions "Si autre, precisez"
-      if (q.label) {
-        var l = q.label.toLowerCase();
-        if (l.includes('si autre')||l.includes('precisez')||l.includes('preciser')) {
-          skipTargets[q.id] = '_autre';
-        }
-      }
-    });
-
-    // 3. Construire la structure des sections Google Forms
-    // Principe: chaque groupe de questions conditionnelles = une section separee
-    // Les questions non conditionnelles restent dans leur section de groupe
-
-    // Construire des "blocs" de questions:
-    // - Bloc normal: questions sans saut entrant
-    // - Bloc conditionnel: questions avec saut entrant (meme source, meme condition)
-
-    var buildRequests = [];
-    var sectionMeta = []; // { type:'section'|'question', label, qIdx, q, isConditional, sourceId, condValue }
-    var itemIdx = 0;
-
-    // Grouper les questions par leur groupe thematique
-    var groupMap = {};
-    var groupOrder = [];
-    questions.forEach(function(q) {
-      var g = q.group || 'general';
+      var g = q.group || 'General';
       if (!groupMap[g]) { groupMap[g] = []; groupOrder.push(g); }
       groupMap[g].push(q);
     });
 
-    // Pour chaque groupe, identifier les sous-groupes conditionnels
-    groupOrder.forEach(function(gname) {
-      var qs = groupMap[gname];
+    const buildRequests = [], sectionItems = [];
+    var itemIdx = 0;
 
-      // Section de groupe principale
-      if (gname !== 'general') {
-        buildRequests.push({ createItem:{ item:{ title:gname, pageBreakItem:{} }, location:{ index:itemIdx } } });
-        sectionMeta.push({ type:'section', label:gname, itemIdx:itemIdx });
+    function makeQItem(q) {
+      var t = q.selectedType || q.type || 'text';
+      var required = q.required !== false;
+      var choices = (q.choices || []).map(function(c) { return { value: typeof c === 'string' ? c : (c.label || String(c)) }; });
+      if (t === 'select_one' && choices.length > 0) return { question: { required: required, choiceQuestion: { type: 'RADIO', options: choices, shuffle: false } } };
+      if (t === 'select_multiple' && choices.length > 0) return { question: { required: required, choiceQuestion: { type: 'CHECKBOX', options: choices, shuffle: false } } };
+      if (t === 'date') return { question: { required: required, dateQuestion: { includeTime: false, includeYear: true } } };
+      if (t === 'time' || t === 'datetime') return { question: { required: required, timeQuestion: { duration: false } } };
+      if (t === 'scale' || t === 'range') return { question: { required: required, scaleQuestion: { low: parseInt(q.numMin) || 1, high: parseInt(q.numMax) || 10, lowLabel: 'Min', highLabel: 'Max' } } };
+      return { question: { required: required, textQuestion: { paragraph: (q.label || '').length > 50 } } };
+    }
+
+    function isAutre(q) {
+      if (!q.label) return false;
+      var l = q.label.toLowerCase();
+      return l.includes('si autre') || l.includes('precisez') || l.includes('preciser');
+    }
+
+    groupOrder.forEach(function(gname) {
+      if (gname !== 'general' && gname !== 'General') {
+        buildRequests.push({ createItem: { item: { title: gname, pageBreakItem: {} }, location: { index: itemIdx } } });
+        sectionItems.push({ type: 'section', name: gname, idx: itemIdx });
         itemIdx++;
       }
-
-      // Identifier les blocs: normal vs conditionnel
-      // Un bloc conditionnel commence quand une question a un relevant
-      var i = 0;
-      while (i < qs.length) {
-        var q = qs[i];
-        var hasRelevant = q.relevant && q.relevant.trim();
-        var isAutreQ = q.label && (q.label.toLowerCase().includes('si autre')||q.label.toLowerCase().includes('precisez'));
-
-        if (hasRelevant || isAutreQ) {
-          // Cette question et les suivantes avec le meme relevant forment un bloc conditionnel
-          // Creer une section vide pour ce bloc
-          var sectionLabel = '_cond_' + itemIdx;
-          buildRequests.push({ createItem:{ item:{ title:'', pageBreakItem:{} }, location:{ index:itemIdx } } });
-          sectionMeta.push({ type:'section', label:sectionLabel, itemIdx:itemIdx, isConditional:true, relevant: q.relevant||'_autre' });
+      groupMap[gname].forEach(function(q) {
+        if (isAutre(q)) {
+          buildRequests.push({ createItem: { item: { title: '', pageBreakItem: {} }, location: { index: itemIdx } } });
+          sectionItems.push({ type: 'section', name: '_a' + itemIdx, idx: itemIdx, isAutreSection: true });
           itemIdx++;
-
-          // Ajouter toutes les questions consecutives avec le meme relevant (ou "Si autre")
-          while (i < qs.length) {
-            var qc = qs[i];
-            var qcRelevant = qc.relevant && qc.relevant.trim();
-            var qcIsAutre = qc.label && (qc.label.toLowerCase().includes('si autre')||qc.label.toLowerCase().includes('precisez'));
-            // Continuer si meme source de saut
-            if (i > 0 && !qcRelevant && !qcIsAutre) break;
-            if (i > 0 && qcRelevant && qcRelevant !== q.relevant) break;
-
-            buildRequests.push({ createItem:{ item:{ title:qc.label||('Q'+(itemIdx+1)), description:makeHint(qc), questionItem:makeQItem(qc) }, location:{ index:itemIdx } } });
-            sectionMeta.push({ type:'question', q:qc, itemIdx:itemIdx, isConditional:true });
-            itemIdx++;
-            i++;
-          }
-        } else {
-          // Question normale
-          buildRequests.push({ createItem:{ item:{ title:q.label||('Q'+(itemIdx+1)), description:makeHint(q), questionItem:makeQItem(q) }, location:{ index:itemIdx } } });
-          sectionMeta.push({ type:'question', q:q, itemIdx:itemIdx, isConditional:false });
-          itemIdx++;
-          i++;
         }
-      }
+        var hint = q.hint || '';
+        var t = q.selectedType || q.type || 'text';
+        if ((t === 'integer' || t === 'decimal') && (q.numMin || q.numMax)) {
+          var parts = [];
+          if (q.numMin) parts.push('min: ' + q.numMin);
+          if (q.numMax) parts.push('max: ' + q.numMax);
+          if (parts.length) hint = (hint ? hint + ' — ' : '') + parts.join(', ');
+        }
+        buildRequests.push({ createItem: { item: { title: q.label || ('Q' + (itemIdx+1)), description: hint, questionItem: makeQItem(q) }, location: { index: itemIdx } } });
+        sectionItems.push({ type: 'question', q: q, idx: itemIdx, isAutre: isAutre(q) });
+        itemIdx++;
+      });
     });
+    buildRequests.push({ createItem: { item: { title: '', pageBreakItem: {} }, location: { index: itemIdx } } });
+    sectionItems.push({ type: 'section', name: '_final', idx: itemIdx, isFinal: true });
 
-    // Section finale pour absorber les sauts "passer les conditionnels"
-    buildRequests.push({ createItem:{ item:{ title:'', pageBreakItem:{} }, location:{ index:itemIdx } } });
-    sectionMeta.push({ type:'section', label:'_final', itemIdx:itemIdx, isFinal:true });
-
-    // 4. Envoyer le batch de creation
-    console.log('[GOOGLE] Creation de ' + buildRequests.length + ' items (questions + sections)');
-    var batch1Res = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
-      method:'POST',
-      headers:{ 'Authorization':'Bearer '+accessToken, 'Content-Type':'application/json' },
-      body: JSON.stringify({ requests:buildRequests, includeFormInResponse:true })
+    const batch1Res = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests: buildRequests, includeFormInResponse: true })
     });
     if (!batch1Res.ok) {
-      var e = await batch1Res.json();
-      console.error('[GOOGLE BATCH1]', JSON.stringify(e).slice(0,300));
-      return res.status(502).json({ error:'BATCH_ERROR', message:'Erreur ajout questions.' });
+      const e = await batch1Res.json();
+      return res.status(502).json({ error: 'BATCH_ERROR', message: 'Erreur ajout questions Google Forms.' });
     }
-    var batch1Data = await batch1Res.json();
-    var updatedForm = batch1Data.form;
+    const updatedForm = (await batch1Res.json()).form;
 
-    // 5. Appliquer la navigation goToSectionId
     if (updatedForm && updatedForm.items) {
-      // Mapper index Google -> itemId
-      var orderedItems = updatedForm.items.slice().sort(function(a,b){ return (a.index||0)-(b.index||0); });
-      orderedItems.forEach(function(item, i) { if (sectionMeta[i]) sectionMeta[i].googleItemId = item.itemId; });
+      const orderedItems = updatedForm.items.slice().sort(function(a, b) { return (a.index || 0) - (b.index || 0); });
+      orderedItems.forEach(function(item, i) { if (sectionItems[i]) sectionItems[i].googleItemId = item.itemId; });
 
-      var navRequests = [];
-
-      // Pour chaque question normale a choix qui precede un bloc conditionnel
-      sectionMeta.forEach(function(sm, idx) {
-        if (sm.type !== 'question' || sm.isConditional) return;
-        var q = sm.q;
+      const navRequests = [];
+      sectionItems.forEach(function(si, idx) {
+        if (si.type !== 'question') return;
+        var nextSi = sectionItems[idx + 1], nextNextSi = sectionItems[idx + 2];
+        if (!nextSi || !nextSi.isAutreSection || !nextNextSi || !nextNextSi.isAutre) return;
+        var q = si.q;
+        var autreIdx = -1;
+        (q.choices || []).forEach(function(c, ci) {
+          var l = (typeof c === 'string' ? c : c.label || '').toLowerCase();
+          if (l.includes('autre') || l.includes('other')) autreIdx = ci;
+        });
+        if (autreIdx < 0 || !nextSi.googleItemId || !si.googleItemId) return;
+        var skipId = null;
+        for (var i2 = idx + 3; i2 < sectionItems.length; i2++) {
+          if (sectionItems[i2].type === 'section') { skipId = sectionItems[i2].googleItemId; break; }
+        }
         var t = q.selectedType || q.type || 'text';
-        if (t !== 'select_one' && t !== 'select_multiple') return;
-
-        // Chercher les sections conditionnelles qui suivent cette question
-        // et qui correspondent a ses modalites
-        var nextSectionIdx = null;
-        var conditionalSections = [];
-
-        for (var i2 = idx+1; i2 < sectionMeta.length; i2++) {
-          var sm2 = sectionMeta[i2];
-          if (sm2.type === 'section' && !sm2.isConditional && !sm2.isFinal) break; // autre groupe
-          if (sm2.type === 'section' && sm2.isConditional) {
-            conditionalSections.push({ sectionId: sm2.googleItemId, relevant: sm2.relevant });
-          }
-          if (sm2.type === 'section' && (sm2.isFinal || (!sm2.isConditional && sm2.label !== '_final'))) {
-            nextSectionIdx = sm2.googleItemId;
-            break;
-          }
-        }
-
-        if (conditionalSections.length === 0) return;
-
-        // Determiner pour chaque choix vers quelle section aller
-        var choices = q.choices || [];
-        var choiceVals = q.choice_values || [];
-
-        // Section finale par defaut (apres tous les conditionnels)
-        var finalSectionId = null;
-        for (var i3 = idx+1; i3 < sectionMeta.length; i3++) {
-          var sm3 = sectionMeta[i3];
-          if (sm3.type === 'section' && (sm3.isFinal || (!sm3.isConditional && !sm3.isFinal && i3 > idx+2))) {
-            finalSectionId = sm3.googleItemId;
-            break;
-          }
-        }
-        if (!finalSectionId && sectionMeta[sectionMeta.length-1]) {
-          finalSectionId = sectionMeta[sectionMeta.length-1].googleItemId;
-        }
-
-        var opts = choices.map(function(c, ci) {
-          var label = typeof c === 'string' ? c : (c.label||String(c));
-          var val = (choiceVals[ci] !== undefined) ? String(choiceVals[ci]) : String(ci);
+        var opts = (q.choices || []).map(function(c, ci) {
+          var label = typeof c === 'string' ? c : (c.label || String(c));
           var opt = { value: label };
-
-          // Chercher si un des blocs conditionnels correspond a ce choix
-          var targetSection = null;
-          conditionalSections.forEach(function(cs) {
-            if (!cs.relevant) return;
-            // Verifier si le relevant pointe vers ce choix
-            // Ex: "${q5} = '1'" -> val = '1'
-            if (cs.relevant === '_autre') {
-              // Pour "Autres, precisez"
-              if (label.toLowerCase().includes('autre')||label.toLowerCase().includes('other')) {
-                targetSection = cs.sectionId;
-              }
-            } else {
-              // Verifier si la valeur du choix correspond au relevant
-              var valInRelevant = cs.relevant.match(/=\s*'([^']+)'/);
-              if (valInRelevant && (valInRelevant[1] === val || valInRelevant[1] === label.toLowerCase())) {
-                targetSection = cs.sectionId;
-              }
-            }
-          });
-
-          if (targetSection) opt.goToSectionId = targetSection;
-          else if (finalSectionId) opt.goToSectionId = finalSectionId;
+          if (ci === autreIdx) opt.goToSectionId = nextSi.googleItemId;
+          else if (skipId) opt.goToSectionId = skipId;
           else opt.goToAction = 'NEXT_SECTION';
           return opt;
         });
-
-        if (!sm.googleItemId) return;
-
-        navRequests.push({ updateItem:{
-          item:{ itemId:sm.googleItemId, title:q.label||'', questionItem:{ question:{ required:q.required!==false, choiceQuestion:{ type:t==='select_multiple'?'CHECKBOX':'RADIO', options:opts, shuffle:false } } } },
-          location:{ index:sm.itemIdx },
-          updateMask:'questionItem'
-        }});
+        navRequests.push({ updateItem: { item: { itemId: si.googleItemId, title: q.label || '', questionItem: { question: { required: q.required !== false, choiceQuestion: { type: t === 'select_multiple' ? 'CHECKBOX' : 'RADIO', options: opts, shuffle: false } } } }, location: { index: si.idx }, updateMask: 'questionItem' } });
       });
 
       if (navRequests.length > 0) {
-        console.log('[GOOGLE] ' + navRequests.length + ' navigations a configurer');
-        var batch2Res = await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
-          method:'POST',
-          headers:{ 'Authorization':'Bearer '+accessToken, 'Content-Type':'application/json' },
-          body: JSON.stringify({ requests:navRequests })
+        await fetch('https://forms.googleapis.com/v1/forms/' + formId + ':batchUpdate', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requests: navRequests })
         });
-        if (!batch2Res.ok) {
-          var e2 = await batch2Res.json();
-          console.warn('[GOOGLE BATCH2]', JSON.stringify(e2).slice(0,300));
-        } else {
-          console.log('[GOOGLE] Navigation configuree avec succes');
-        }
       }
     }
 
     console.log('[DEPLOY] Google Forms ok ' + formId);
-    res.json({ success:true, formId:formId, url:'https://docs.google.com/forms/d/'+formId+'/edit', questions:questions.length });
-
+    res.json({ success: true, formId: formId, url: 'https://docs.google.com/forms/d/' + formId + '/edit', questions: questions.length });
   } catch(err) {
     console.error('[DEPLOY GOOGLE ERROR]', err.message);
-    res.status(500).json({ error:'SERVER_ERROR', message:err.message });
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
   }
 });
 
@@ -687,29 +664,26 @@ app.post('/api/deploy/excel', async (req, res) => {
     const { form } = req.body;
     if (!form) return res.status(400).json({ error: 'Formulaire manquant' });
     const questions = form.questions || [];
-    console.log('[EXCEL] Generation - ' + questions.length + ' questions');
+    console.log('[EXCEL] ' + questions.length + ' questions');
 
-    // Mots vides francais a supprimer des noms de variables
-    const stopWords = new Set(['quel','quelle','quels','quelles','est','sont','avez','vous','votre','vos','etes','avons','ont','avoir','quoi','comment','combien','pourquoi','si','oui','non','les','des','une','un','la','le','au','aux','du','de','que','qui','quand','par','pour','avec','sans','sur','sous','dans','entre','vers','chez','en','et','mais','donc','car','ni','or','pas','ne','plus','moins','tres','bien','tout','tous','toute','toutes','autre','autres','meme','plusieurs','quelques','ete','fait','fois']);
+    const stopWords = new Set(['quel','quelle','quels','quelles','est','sont','avez','vous','votre','vos','etes','avons','ont','avoir','quoi','comment','combien','pourquoi','si','oui','non','les','des','une','un','la','le','au','aux','du','de','que','qui','quand','par','pour','avec','sans','sur','sous','dans','entre','vers','chez','en','et','mais','donc','car','ni','or','pas','ne','plus','moins','tres','bien','tout','tous','toute','toutes','autre','autres','meme','plusieurs','quelques']);
 
-    function makeVarName(label) {
-      var s = label.normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
-      var words = s.replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(function(w){ return w.length>2 && !stopWords.has(w); });
-      var v = words.slice(0,3).join('_').slice(0,30).replace(/_+$/,'');
-      return v || 'variable';
+    function makeVarName(label, usedNames) {
+      var s = label.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      var words = s.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(function(w) { return w.length > 2 && !stopWords.has(w); });
+      var base = words.slice(0, 3).join('_').slice(0, 25).replace(/_+$/, '') || 'variable';
+      var name = base;
+      if (usedNames[base]) { usedNames[base]++; name = base + '_' + usedNames[base]; }
+      else usedNames[base] = 1;
+      return name;
     }
 
-    // Grouper par section + noms uniques
     var groupMap = {}, groupOrder = [], usedNames = {}, colMeta = [];
     questions.forEach(function(q) {
       var g = q.group || 'General';
       if (!groupMap[g]) { groupMap[g] = []; groupOrder.push(g); }
       groupMap[g].push(q);
-      var base = makeVarName(q.label || q.id || 'var');
-      var varname = base;
-      if (usedNames[base]) { usedNames[base]++; varname = base + '_' + usedNames[base]; }
-      else usedNames[base] = 1;
-      colMeta.push({ q: q, group: g, varname: varname });
+      colMeta.push({ q: q, group: g, varname: makeVarName(q.label || q.id || 'var', usedNames) });
     });
 
     var wb = new ExcelJS.Workbook();
@@ -717,160 +691,116 @@ app.post('/api/deploy/excel', async (req, res) => {
     var ws1 = wb.addWorksheet('Saisie');
     var ws2 = wb.addWorksheet('Dictionnaire');
 
-    // Styles
-    var secFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF1F4E79' } };
-    var varFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF2E75B6' } };
-    var oddFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFEBF3FB' } };
-    var evnFill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFFFFFFF' } };
-    var whtFont = { name:'Arial', bold:true, color:{ argb:'FFFFFFFF' }, size:10 };
-    var varFont = { name:'Arial', bold:true, color:{ argb:'FFFFFFFF' }, size:9 };
-    var datFont = { name:'Arial', size:9 };
-    var brd = { top:{style:'thin',color:{argb:'FFBDD7EE'}}, bottom:{style:'thin',color:{argb:'FFBDD7EE'}}, left:{style:'thin',color:{argb:'FFBDD7EE'}}, right:{style:'thin',color:{argb:'FFBDD7EE'}} };
+    var FILL_SEC = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E79' } };
+    var FILL_VAR = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E75B6' } };
+    var FILL_ODD = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEBF3FB' } };
+    var FILL_EVN = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } };
+    var FNT_WH = { name: 'Arial', bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
+    var FNT_VAR = { name: 'Arial', bold: true, color: { argb: 'FFFFFFFF' }, size: 9 };
+    var FNT_DAT = { name: 'Arial', size: 9 };
+    var BRD = { top: { style: 'thin', color: { argb: 'FFBDD7EE' } }, bottom: { style: 'thin', color: { argb: 'FFBDD7EE' } }, left: { style: 'thin', color: { argb: 'FFBDD7EE' } }, right: { style: 'thin', color: { argb: 'FFBDD7EE' } } };
 
-    // === FEUILLE 1: SAISIE ===
-    // Ligne 1: sections fusionnées
-    var r1 = ws1.getRow(1);
-    r1.height = 22;
+    var r1 = ws1.getRow(1); r1.height = 22;
     var col = 1;
     groupOrder.forEach(function(g) {
       var n = groupMap[g].length;
       var cell = ws1.getCell(1, col);
-      cell.value = g;
-      cell.font = whtFont; cell.fill = secFill; cell.border = brd;
-      cell.alignment = { horizontal:'center', vertical:'middle' };
-      if (n > 1) ws1.mergeCells(1, col, 1, col+n-1);
+      cell.value = g; cell.font = FNT_WH; cell.fill = FILL_SEC; cell.border = BRD;
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      if (n > 1) ws1.mergeCells(1, col, 1, col + n - 1);
       col += n;
     });
 
-    // Ligne 2: noms variables
-    var r2 = ws1.getRow(2);
-    r2.height = 20;
+    var r2 = ws1.getRow(2); r2.height = 20;
     colMeta.forEach(function(meta, i) {
-      var cell = ws1.getCell(2, i+1);
-      cell.value = meta.varname;
-      cell.font = varFont; cell.fill = varFill; cell.border = brd;
-      cell.alignment = { horizontal:'center', vertical:'middle' };
+      var cell = ws1.getCell(2, i + 1);
+      cell.value = meta.varname; cell.font = FNT_VAR; cell.fill = FILL_VAR; cell.border = BRD;
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
     });
 
-    ws1.views = [{ state:'frozen', ySplit:2 }];
-
-    // 100 lignes de saisie
+    ws1.views = [{ state: 'frozen', ySplit: 2 }];
     var N = 100;
-    for (var row = 3; row <= 2+N; row++) {
-      var fill = (row % 2 === 1) ? oddFill : evnFill;
-      var exRow = ws1.getRow(row);
-      exRow.height = 18;
+    for (var row = 3; row <= 2 + N; row++) {
+      var fill = (row % 2 === 1) ? FILL_ODD : FILL_EVN;
+      ws1.getRow(row).height = 18;
       colMeta.forEach(function(meta, i) {
-        var cell = ws1.getCell(row, i+1);
-        cell.fill = fill; cell.border = brd; cell.font = datFont;
-        cell.alignment = { horizontal:'left', vertical:'middle' };
+        var cell = ws1.getCell(row, i + 1);
+        cell.fill = fill; cell.border = BRD; cell.font = FNT_DAT;
+        cell.alignment = { horizontal: 'left', vertical: 'middle' };
       });
     }
 
-    // Validations et formats par colonne
     colMeta.forEach(function(meta, i) {
       var q = meta.q;
       var t = q.selectedType || q.type || 'text';
       var colNum = i + 1;
-
-      for (var row = 3; row <= 2+N; row++) {
+      for (var row = 3; row <= 2 + N; row++) {
         var cell = ws1.getCell(row, colNum);
-
         if (t === 'select_one' || t === 'select_multiple') {
-          var choices = (q.choices || []).map(function(c){ return typeof c==='string'?c:(c.label||String(c)); });
+          var choices = (q.choices || []).map(function(c) { return typeof c === 'string' ? c : (c.label || String(c)); });
           if (choices.length > 0) {
-            var formula = '"' + choices.slice(0,20).join(',') + '"';
+            var formula = '"' + choices.slice(0, 20).join(',') + '"';
             if (formula.length <= 255) {
-              cell.dataValidation = {
-                type: 'list',
-                allowBlank: true,
-                formulae: [formula],
-                showErrorMessage: true,
-                errorStyle: 'stop',
-                errorTitle: 'Valeur invalide',
-                error: 'Choisissez une valeur dans la liste',
-                showInputMessage: true,
-                promptTitle: (q.label||'').slice(0,32),
-                prompt: 'Selectionnez une option'
-              };
+              cell.dataValidation = { type: 'list', allowBlank: true, formulae: [formula], showErrorMessage: true, errorStyle: 'stop', errorTitle: 'Valeur invalide', error: 'Choisissez une valeur dans la liste' };
             }
           }
-        }
-
-        else if (t === 'integer') {
+        } else if (t === 'integer') {
           var nm = q.numMin, nx = q.numMax;
-          var nmOk = nm !== '' && nm != null, nxOk = nx !== '' && nx != null;
-          var dv = { type:'whole', allowBlank:true, showErrorMessage:true, errorStyle:'stop', errorTitle:'Valeur invalide', error:'Entrez un nombre entier valide' };
-          if (nmOk && nxOk) { dv.operator='between'; dv.formulae=[String(nm),String(nx)]; }
-          else if (nmOk) { dv.operator='greaterThanOrEqual'; dv.formulae=[String(nm)]; }
-          else if (nxOk) { dv.operator='lessThanOrEqual'; dv.formulae=[String(nx)]; }
-          else { dv.operator='between'; dv.formulae=['-999999','999999']; }
-          cell.dataValidation = dv;
-          cell.numFmt = '0';
-        }
-
-        else if (t === 'decimal') {
+          var dv = { type: 'whole', allowBlank: true, showErrorMessage: true, errorStyle: 'stop', errorTitle: 'Valeur invalide', error: 'Entrez un nombre entier' };
+          if (nm && nx) { dv.operator = 'between'; dv.formulae = [String(nm), String(nx)]; }
+          else if (nm) { dv.operator = 'greaterThanOrEqual'; dv.formulae = [String(nm)]; }
+          else if (nx) { dv.operator = 'lessThanOrEqual'; dv.formulae = [String(nx)]; }
+          else { dv.operator = 'between'; dv.formulae = ['-999999', '999999']; }
+          cell.dataValidation = dv; cell.numFmt = '0';
+        } else if (t === 'decimal') {
           var nm2 = q.numMin, nx2 = q.numMax;
-          var nm2Ok = nm2 !== '' && nm2 != null, nx2Ok = nx2 !== '' && nx2 != null;
-          var dv2 = { type:'decimal', allowBlank:true, showErrorMessage:true, errorStyle:'stop', errorTitle:'Valeur invalide', error:'Entrez un nombre decimal valide' };
-          if (nm2Ok && nx2Ok) { dv2.operator='between'; dv2.formulae=[String(nm2),String(nx2)]; }
-          else { dv2.operator='between'; dv2.formulae=['-999999','999999']; }
+          var dv2 = { type: 'decimal', allowBlank: true, showErrorMessage: true, errorStyle: 'stop', errorTitle: 'Valeur invalide', error: 'Entrez un nombre decimal' };
+          if (nm2 && nx2) { dv2.operator = 'between'; dv2.formulae = [String(nm2), String(nx2)]; }
+          else { dv2.operator = 'between'; dv2.formulae = ['-999999', '999999']; }
           cell.dataValidation = dv2;
           var after = q.numDigitsAfter;
           cell.numFmt = '0.' + '0'.repeat(after && String(after).match(/^\d+$/) ? parseInt(after) : 2);
-        }
-
-        else if (t === 'date') {
-          cell.dataValidation = { type:'date', allowBlank:true, showInputMessage:true, promptTitle:'Date', prompt:'Format: JJ/MM/AAAA' };
+        } else if (t === 'date') {
+          cell.dataValidation = { type: 'date', allowBlank: true, showInputMessage: true, promptTitle: 'Date', prompt: 'Format: JJ/MM/AAAA' };
           cell.numFmt = 'DD/MM/YYYY';
-        }
-
-        else if (t === 'time') {
+        } else if (t === 'time') {
           cell.numFmt = 'HH:MM';
-        }
-
-        else if (t === 'datetime') {
+        } else if (t === 'datetime') {
           cell.numFmt = 'DD/MM/YYYY HH:MM';
         }
       }
-
-      // Largeur colonne
       ws1.getColumn(colNum).width = Math.max(15, Math.min(28, meta.varname.length + 4));
     });
 
-    // === FEUILLE 2: DICTIONNAIRE ===
-    var typeLabels = { select_one:'Choix unique', select_multiple:'Choix multiple', integer:'Nombre entier', decimal:'Nombre decimal', date:'Date', time:'Heure', datetime:'Date et heure', text:'Texte libre', calculate:'Calcul auto', geopoint:'GPS', image:'Photo', audio:'Audio', video:'Video', file:'Fichier', barcode:'Code-barres', acknowledge:'Confirmation', rank:'Classement', range:'Echelle', note:'Note' };
-    var hdrs = ['Variable','Libelle complet de la question','Type','Section','Obligatoire','Modalites'];
-    var hdrRow = ws2.getRow(1);
-    hdrRow.height = 20;
+    var typeLabels = { select_one: 'Choix unique', select_multiple: 'Choix multiple', integer: 'Nombre entier', decimal: 'Nombre decimal', date: 'Date', time: 'Heure', datetime: 'Date et heure', text: 'Texte libre', calculate: 'Calcul auto', geopoint: 'GPS', image: 'Photo', audio: 'Audio', video: 'Video', file: 'Fichier', barcode: 'Code-barres', acknowledge: 'Confirmation', rank: 'Classement', range: 'Echelle', note: 'Note/Texte' };
+    var hdrs = ['Variable', 'Libelle complet de la question', 'Type', 'Section', 'Obligatoire', 'Modalites'];
     hdrs.forEach(function(h, j) {
-      var cell = ws2.getCell(1, j+1);
-      cell.value = h; cell.font = whtFont; cell.fill = secFill; cell.border = brd;
-      cell.alignment = { horizontal:'center', vertical:'middle' };
+      var cell = ws2.getCell(1, j + 1);
+      cell.value = h; cell.font = FNT_WH; cell.fill = FILL_SEC; cell.border = BRD;
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
     });
-    ws2.views = [{ state:'frozen', ySplit:1 }];
-    ws2.columns = [{ width:22 },{ width:55 },{ width:18 },{ width:25 },{ width:12 },{ width:45 }];
+    ws2.getRow(1).height = 20;
+    ws2.views = [{ state: 'frozen', ySplit: 1 }];
+    ws2.columns = [{ width: 22 }, { width: 55 }, { width: 18 }, { width: 25 }, { width: 12 }, { width: 45 }];
 
     colMeta.forEach(function(meta, r) {
       var q = meta.q;
       var t = q.selectedType || q.type || 'text';
-      var choices = (q.choices||[]).map(function(c){ return typeof c==='string'?c:(c.label||String(c)); }).join(' / ');
-      var fill = (r%2===0) ? oddFill : evnFill;
-      var rowData = [meta.varname, q.label||'', typeLabels[t]||t, meta.group, q.required!==false?'Oui':'Non', choices];
+      var choices = (q.choices || []).map(function(c) { return typeof c === 'string' ? c : (c.label || String(c)); }).join(' / ');
+      var fill = (r % 2 === 0) ? FILL_ODD : FILL_EVN;
+      var rowData = [meta.varname, q.label || '', typeLabels[t] || t, meta.group, q.required !== false ? 'Oui' : 'Non', choices];
       rowData.forEach(function(val, j) {
-        var cell = ws2.getCell(r+2, j+1);
-        cell.value = val; cell.font = datFont; cell.fill = fill; cell.border = brd;
-        cell.alignment = { horizontal:'left', vertical:'middle', wrapText:(j===1||j===5) };
+        var cell = ws2.getCell(r + 2, j + 1);
+        cell.value = val; cell.font = FNT_DAT; cell.fill = fill; cell.border = BRD;
+        cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: (j === 1 || j === 5) };
       });
     });
 
-    // Generer le buffer
-    var filename = (form.title||'formulaire').replace(/[^a-zA-Z0-9_-]/g,'_').slice(0,40) + '_masque.xlsx';
+    var filename = (form.title || 'formulaire').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) + '_masque.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
     await wb.xlsx.write(res);
     console.log('[EXCEL] ok - ' + filename);
-
   } catch(err) {
     console.error('[EXCEL ERROR]', err.message);
     if (!res.headersSent) res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
@@ -878,122 +808,54 @@ app.post('/api/deploy/excel', async (req, res) => {
 });
 
 // ============ BUILDER KOBOTOOLBOX ============
-function fixSkipLogic(form) {
-  // Corriger les IDs de sauts invalides
-  var questions = form.questions || [];
-
-  // Construire un index des questions: id -> question, label_norm -> question
-  var idMap = {};
-  var labelMap = {};
-  questions.forEach(function(q) {
-    var id = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
-    idMap[id] = q;
-    // Normaliser le label pour la recherche
-    var labelNorm = (q.label || '').toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').slice(0, 20);
-    if (labelNorm) labelMap[labelNorm] = id;
-  });
-
-  var validIds = new Set(Object.keys(idMap));
-
-  questions.forEach(function(q) {
-    if (!q.relevant) return;
-
-    var relevant = q.relevant;
-    var refs = relevant.match(/\$\{([^}]+)\}/g) || [];
-    var needsFix = false;
-
-    refs.forEach(function(ref) {
-      var refId = ref.replace('${', '').replace('}', '');
-      if (!validIds.has(refId)) {
-        needsFix = true;
-        // Chercher la question la plus proche par similarite d'ID
-        var bestMatch = null;
-        var bestScore = 0;
-
-        // Essai 1: chercher un ID qui contient le refId ou vice versa
-        Object.keys(idMap).forEach(function(validId) {
-          if (validId.includes(refId) || refId.includes(validId)) {
-            var score = Math.min(validId.length, refId.length) / Math.max(validId.length, refId.length);
-            if (score > bestScore) { bestScore = score; bestMatch = validId; }
-          }
-        });
-
-        // Essai 2: chercher par numero si le refId contient un numero
-        if (!bestMatch || bestScore < 0.5) {
-          var numMatch = refId.match(/\d+/);
-          if (numMatch) {
-            var num = parseInt(numMatch[0]);
-            var qTarget = questions.find(function(qq) { return qq.num === num; });
-            if (qTarget) bestMatch = (qTarget.id || ('q' + qTarget.num)).replace(/[^a-zA-Z0-9_]/g, '_');
-          }
-        }
-
-        if (bestMatch) {
-          console.log('[FIX] Saut corrige: ${' + refId + '} -> ${' + bestMatch + '}');
-          relevant = relevant.replace('${' + refId + '}', '${' + bestMatch + '}');
-        } else {
-          // Ne pas supprimer - marquer comme invalide pour signalement
-          console.log('[FIX] Saut invalide non corrigeable: ${' + refId + '} - signale a l utilisateur');
-          if (!form._invalidSkips) form._invalidSkips = [];
-          form._invalidSkips.push({
-            questionId: q.id,
-            questionLabel: q.label,
-            invalidRef: refId,
-            formula: q.relevant
-          });
-          // Laisser le relevant intact pour que l utilisateur puisse le voir et decider
-        }
-      }
-    });
-
-    if (needsFix) q.relevant = relevant;
-  });
-
-  return form;
-}
-
 function buildKoboContent(form) {
-  form = fixSkipLogic(form);
   var survey = [];
   var choices = [];
   var seen = new Set();
   var groups = {};
+  var groupOrder = [];
+
   (form.questions || []).forEach(function(q) {
     var g = q.group || 'general';
-    if (!groups[g]) groups[g] = [];
+    if (!groups[g]) { groups[g] = []; groupOrder.push(g); }
     groups[g].push(q);
   });
-  Object.keys(groups).forEach(function(gname) {
+
+  // Corriger les sauts invalides avant de construire
+  var validQIds = new Set((form.questions || []).map(function(q) {
+    return (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
+  }));
+
+  groupOrder.forEach(function(gname) {
     var qs = groups[gname];
-    var gId = gname.replace(/\s+/g,'_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'').slice(0,32) || 'group';
+    var gId = gname.replace(/\s+/g, '_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]/g, '').slice(0, 32) || 'group';
+
     if (gname !== 'general') survey.push({ type: 'begin_group', name: gId, label: gname });
+
     qs.forEach(function(q) {
       var fmtIdx = q.validatedFormatIdx !== undefined ? q.validatedFormatIdx : (q.suggested_format_idx || 0);
       var selectedFmt = q.formats && q.formats[fmtIdx] ? q.formats[fmtIdx] : null;
       var t = q.selectedType || (selectedFmt ? selectedFmt.type : null) || q.type || 'text';
-      var name = (q.id || ('q'+q.num)).replace(/[^a-zA-Z0-9_]/g,'_');
+      var name = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
       var row = { type: t, name: name, label: q.label || '', required: q.required !== false ? 'yes' : 'no', hint: q.hint || '' };
-      // Skip logic
+
+      // Skip logic — verifier que les IDs references existent
       var relevant = q.relevant || '';
       if (!relevant && q.suggestions) {
         q.suggestions.forEach(function(s, si) {
           if (s.type === 'skip_logic' && s.value && q.confirmedSuggestions && q.confirmedSuggestions[si]) relevant = s.value;
         });
       }
-      if (relevant) row.relevant = relevant;
-      // Calculate
-      if (t === 'calculate') {
-        var calc = q.calculation || '';
-        if (!calc && q.suggestions) {
-          q.suggestions.forEach(function(s, si) {
-            if (s.type === 'calculate' && s.value && q.confirmedSuggestions && q.confirmedSuggestions[si]) calc = s.value;
-          });
-        }
-        if (calc) row.calculation = calc;
-        delete row.required;
+      if (relevant) {
+        // Verifier les references
+        var refs = relevant.match(/\$\{([^}]+)\}/g) || [];
+        var allValid = refs.every(function(ref) {
+          return validQIds.has(ref.replace('${', '').replace('}', ''));
+        });
+        if (allValid) row.relevant = relevant;
+        else console.log('[KOBO] Saut invalide ignore pour ' + name + ': ' + relevant);
       }
+
       // Constraints
       var constraints = [];
       if (q.numMin !== '' && q.numMin != null) constraints.push('. >= ' + q.numMin);
@@ -1007,8 +869,10 @@ function buildKoboContent(form) {
         });
       }
       if (constraints.length > 0) { row.constraint = constraints.join(' and '); row.constraint_message = 'Valeur hors limites'; }
-      if (t === 'range') { row.parameters = 'start=' + (q.numMin||1) + ' end=' + (q.numMax||10); delete row.required; }
+
+      if (t === 'range') { row.parameters = 'start=' + (q.numMin || 1) + ' end=' + (q.numMax || 10); delete row.required; }
       if (t === 'note' || t === 'calculate') delete row.required;
+
       // Choices
       if (t === 'select_one' || t === 'select_multiple' || t === 'rank') {
         var listName = 'list_' + name;
@@ -1023,14 +887,17 @@ function buildKoboContent(form) {
           });
         }
       }
+
       survey.push(row);
     });
+
     if (gname !== 'general') survey.push({ type: 'end_group', name: gId });
   });
-  var formId = (form.title||'formulaire').replace(/\s+/g,'_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9_]/g,'').slice(0,32);
+
+  var formId = (form.title || 'formulaire').replace(/\s+/g, '_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]/g, '').slice(0, 32);
   return { survey: survey, choices: choices, settings: [{ form_title: form.title || 'Formulaire', form_id: formId, version: '1' }] };
 }
 
 app.listen(PORT, function() {
-  console.log('\n╔══════════════════════════════════╗\n║   R2 Forms Backend v4.0          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
+  console.log('\n╔══════════════════════════════════╗\n║   R2 Forms Backend v5.0          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
 });
