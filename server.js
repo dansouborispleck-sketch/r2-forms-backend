@@ -65,9 +65,21 @@ app.post('/api/analyse', async (req, res) => {
     if (!text || text.trim().length < 10) return res.status(400).json({ error: 'Texte trop court' });
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Cle API manquante' });
-    const inputText = text.slice(0, 8000);
-    const truncated = text.length > 8000;
-    console.log('[ANALYSE] ' + text.length + ' chars -> ' + tool);
+    // Chunking pour les grands questionnaires
+    const CHUNK_SIZE = 6000;
+    const chunks = [];
+    let pos = 0;
+    while (pos < text.length) {
+      let end = Math.min(pos + CHUNK_SIZE, text.length);
+      if (end < text.length) {
+        const lastNewline = text.lastIndexOf('\n', end);
+        if (lastNewline > pos + CHUNK_SIZE * 0.7) end = lastNewline;
+      }
+      chunks.push(text.slice(pos, end));
+      pos = end;
+    }
+    const truncated = false;
+    console.log('[ANALYSE] ' + text.length + ' chars -> ' + chunks.length + ' chunks -> ' + tool);
 
     const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions.\n\n' +
 'REGLES ABSOLUES:\n' +
@@ -104,34 +116,32 @@ app.post('/api/analyse', async (req, res) => {
 'SUGGESTIONS: {"type":"skip_logic|calculate|constraint","label":"court","description":"clair","value":"formule XLSForm","confidence":"high|medium|low"}\n' +
 'REGLES: required=true par defaut. JSON compact. choice_values=codes numeriques ["0","1",...]. Outil: ' + tool;
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5',
-        max_tokens: 32000,
-        system: system,
-        messages: [{ role: 'user', content: 'Extrais TOUTES les questions:\n\n' + inputText }]
-      })
-    });
-
-    if (!response.ok) {
-      const e = await response.json();
-      console.error('[CLAUDE ERROR]', e);
-      return res.status(502).json({ error: 'CLAUDE_ERROR', message: 'Erreur API Claude.' });
-    }
-
-    const data = await response.json();
-    const rawText = data.content && data.content[0] ? data.content[0].text : '{}';
-
-    let form;
-    try {
+    // Traiter chaque chunk
+    async function analyseChunk(chunkText, chunkNum, totalChunks, previousIds) {
+      const contextNote = totalChunks > 1
+        ? '\nPartie ' + chunkNum + '/' + totalChunks + '.' + (chunkNum === 1 ? ' Commence depuis le debut.' : ' Continue - ne repete pas les questions deja extraites.') + (chunkNum === totalChunks ? ' Derniere partie.' : '') + (previousIds.length > 0 ? '\nIDs deja extraits: ' + previousIds.slice(-10).join(', ') : '')
+        : '';
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-5',
+          max_tokens: 32000,
+          system: system + contextNote,
+          messages: [{ role: 'user', content: 'Extrais TOUTES les questions de cette partie:\n\n' + chunkText }]
+        })
+      });
+      if (!response.ok) {
+        const e = await response.json();
+        throw new Error('Claude API: ' + (e.error && e.error.message || JSON.stringify(e)));
+      }
+      const data = await response.json();
+      const rawText = data.content && data.content[0] ? data.content[0].text : '{}';
       let jsonStr = rawText.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
       const s = jsonStr.indexOf('{');
       if (s > 0) jsonStr = jsonStr.slice(s);
-      try {
-        form = JSON.parse(jsonStr);
-      } catch(e) {
+      try { return JSON.parse(jsonStr); }
+      catch(e) {
         const lc = jsonStr.lastIndexOf('},');
         if (lc > 100) jsonStr = jsonStr.slice(0, lc+1);
         jsonStr = jsonStr.replace(/,\s*$/,'');
@@ -139,21 +149,62 @@ app.post('/api/analyse', async (req, res) => {
         const cb = (jsonStr.match(/\{/g)||[]).length-(jsonStr.match(/\}/g)||[]).length;
         for(var i=0;i<Math.max(0,ob);i++) jsonStr+=']';
         for(var j=0;j<Math.max(0,cb);j++) jsonStr+='}';
-        form = JSON.parse(jsonStr);
-        console.log('[PARSE] JSON repare');
+        return JSON.parse(jsonStr);
       }
-    } catch(pe) {
-      console.error('[PARSE ERROR]', pe.message);
-      return res.status(502).json({ error: 'PARSE_ERROR', message: 'Reponse invalide.' });
     }
 
-    if (!form.questions || !Array.isArray(form.questions))
+    let allQuestions = [];
+    let formTitle = '';
+    let formSummary = '';
+    let allGroups = new Set();
+    let coherenceReport = [];
+    let previousIds = [];
+    const failedChunks = [];
+
+    for (var ci = 0; ci < chunks.length; ci++) {
+      var chunkNum = ci + 1;
+      console.log('[ANALYSE] Chunk ' + chunkNum + '/' + chunks.length + ' (' + chunks[ci].length + ' chars)');
+      var success = false;
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        try {
+          if (attempt > 1) await new Promise(function(r){ setTimeout(r, 1000 * attempt); });
+          var result = await analyseChunk(chunks[ci], chunkNum, chunks.length, previousIds);
+          if (chunkNum === 1) { formTitle = result.title || ''; formSummary = result.summary || ''; }
+          if (result.coherence_report) result.coherence_report.forEach(function(r){ coherenceReport.push(r); });
+          if (result.questions && Array.isArray(result.questions)) {
+            var existingLabels = new Set(allQuestions.map(function(q){ return (q.label||'').trim().toLowerCase(); }));
+            var newQs = result.questions.filter(function(q){
+              var lbl = (q.label||'').trim().toLowerCase();
+              return lbl && !existingLabels.has(lbl);
+            });
+            newQs.forEach(function(q, idx){
+              q.num = allQuestions.length + idx + 1;
+              q.id = 'q' + q.num;
+            });
+            allQuestions = allQuestions.concat(newQs);
+            previousIds = allQuestions.slice(-15).map(function(q){ return q.id; });
+          }
+          if (result.groups) result.groups.forEach(function(g){ allGroups.add(g); });
+          console.log('[ANALYSE] Chunk ' + chunkNum + ' ok: ' + (result.questions ? result.questions.length : 0) + ' questions -> Total: ' + allQuestions.length);
+          success = true;
+          break;
+        } catch(chunkErr) {
+          console.error('[ANALYSE] Chunk ' + chunkNum + ' attempt ' + attempt + ' failed:', chunkErr.message);
+        }
+      }
+      if (!success) { failedChunks.push(chunkNum); console.error('[ANALYSE] Chunk ' + chunkNum + ' abandonne'); }
+      if (ci < chunks.length - 1) await new Promise(function(r){ setTimeout(r, 500); });
+    }
+
+    if (allQuestions.length === 0)
       return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question detectee.' });
 
-    console.log('[ANALYSE] ok ' + form.questions.length + ' questions');
+    var form = { title: formTitle, summary: formSummary, coherence_report: coherenceReport, questions: allQuestions, groups: Array.from(allGroups) };
+    console.log('[ANALYSE] ok ' + allQuestions.length + ' questions au total');
     res.json({
-      success: true, form: form, truncated: truncated,
-      warning: truncated ? 'Questionnaire tronque a ' + inputText.length + ' chars sur ' + text.length + ' total.' : null
+      success: true, form: form, truncated: false,
+      chunks_total: chunks.length, chunks_failed: failedChunks.length,
+      warning: failedChunks.length > 0 ? failedChunks.length + ' section(s) non traitees. Verifiez vos questions.' : null
     });
   } catch(err) {
     console.error('[ANALYSE ERROR]', err.message);
