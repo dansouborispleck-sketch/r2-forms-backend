@@ -98,7 +98,7 @@ app.post('/api/analyse', async (req, res) => {
 
     const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions et le texte introductif.\n\n' +
 'REGLES ABSOLUES:\n' +
-'1. INTRODUCTION: Si le questionnaire commence par une presentation ou introduction (objet, contexte, consignes), inclus-la comme premiere question de type "note" avec son texte complet.\n' +
+'1. TEXTE AVANT LA PREMIERE QUESTION: Tout texte apparaissant AVANT la premiere question numerotee (avant "1)" ou "Q1" ou "1.") doit IMPERATIVEMENT etre inclus comme premiere question de type "note". REGLES STRICTES: (a) Le label = le texte INTEGRAL copie mot pour mot, JAMAIS un titre invente comme "Introduction" ou "Presentation"; (b) Ne jamais ignorer ce texte meme s\'il semble long; (c) Si le questionnaire n\'a pas de texte introductif, ne pas creer de note fictive.\n' +
 '2. Extrais TOUTES les questions: numerotees, sans numero, sous-questions implicites, questions en entete.\n' +
 '3. GROUPES: Utilise le TITRE COMPLET de la section.\n' +
 '4. ACCENTS: Preserve absolument tous les accents (é, è, à, ù, â, ê, î, ô, û, ç, etc.).\n' +
