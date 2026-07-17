@@ -108,7 +108,22 @@ app.post('/api/analyse', async (req, res) => {
 '8. coherence_report: observations utiles.\n\n' +
 'FORMAT JSON COMPACT:\n' +
 '{"title":"titre","coherence_report":["obs"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"choice_values":[],"group":"TITRE COMPLET","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
-'CLASSES: quantitative, qualitative_choice, qualitative_open, date_time, geopoint, geotrace, geoshape, media_photo, media_audio, media_video, media_file, barcode, acknowledge, ranking, scale, note\n\n' +
+'CLASSES ET FORMATS OBLIGATOIRES:\n' +
+'- quantitative -> formats:[{id:"A",name:"Nombre entier",type:"integer",note:"Ex: 25"},{id:"B",name:"Nombre decimal",type:"decimal",note:"Ex: 65,5"},{id:"C",name:"Echelle",type:"range",note:"Ex: 1 a 10"}], suggested_format_idx:0\n' +
+'- qualitative_choice -> formats:[{id:"A",name:"Choix unique",type:"select_one",note:"Une seule reponse"},{id:"B",name:"Choix multiple",type:"select_multiple",note:"Plusieurs reponses"},{id:"C",name:"Texte libre",type:"text",note:"Reponse libre"}], suggested_format_idx:0 (ou 1 si "plusieurs reponses" mentionnes)\n' +
+'- qualitative_open -> formats:[{id:"A",name:"Reponse courte",type:"text",note:"Quelques mots"},{id:"B",name:"Reponse longue",type:"text",note:"Plusieurs phrases"}], suggested_format_idx:0\n' +
+'- date_time -> formats:[{id:"A",name:"Date",type:"date",note:"jj/mm/aaaa"},{id:"B",name:"Heure",type:"time",note:"hh:mm"},{id:"C",name:"Date et heure",type:"datetime",note:"jj/mm/aaaa hh:mm"}], suggested_format_idx:0\n' +
+'- geopoint -> formats:[{id:"A",name:"GPS",type:"geopoint",note:"Capture GPS auto"}], suggested_format_idx:0\n' +
+'- media_photo -> formats:[{id:"A",name:"Photo",type:"image",note:"Photo"}], suggested_format_idx:0\n' +
+'- media_audio -> formats:[{id:"A",name:"Audio",type:"audio",note:"Enregistrement"}], suggested_format_idx:0\n' +
+'- media_video -> formats:[{id:"A",name:"Video",type:"video",note:"Video"}], suggested_format_idx:0\n' +
+'- media_file -> formats:[{id:"A",name:"Fichier",type:"file",note:"Piece jointe"}], suggested_format_idx:0\n' +
+'- barcode -> formats:[{id:"A",name:"Code-barres",type:"barcode",note:"Scan"}], suggested_format_idx:0\n' +
+'- acknowledge -> formats:[{id:"A",name:"Confirmation",type:"acknowledge",note:"Case a cocher"}], suggested_format_idx:0\n' +
+'- ranking -> formats:[{id:"A",name:"Classement",type:"rank",note:"Ordre de preference"}], suggested_format_idx:0\n' +
+'- scale -> formats:[{id:"A",name:"Echelle",type:"range",note:"Curseur"}], suggested_format_idx:0\n' +
+'- note -> formats:[{id:"A",name:"Note",type:"note",note:"Texte sans saisie"}], suggested_format_idx:0\n' +
+'IMPORTANT: Chaque question DOIT avoir son tableau formats[] rempli selon sa classe. Ne jamais laisser formats:[]\n\n' +
 'SUGGESTIONS (skip_logic et constraint uniquement):\n' +
 '{"type":"skip_logic|constraint","label":"court","description":"clair","value":"formule XLSForm avec vrais IDs","confidence":"high|medium|low"}\n\n' +
 'Outil cible: ' + tool;
