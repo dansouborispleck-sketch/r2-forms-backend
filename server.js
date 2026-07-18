@@ -918,6 +918,7 @@ function buildKoboContent(form) {
 
       if (t === 'range') { row.parameters = 'start=' + (q.numMin || 1) + ' end=' + (q.numMax || 10); delete row.required; }
       if (t === 'note' || t === 'calculate') delete row.required;
+      if (t === 'audio' && q.required === false) delete row.required;
 
       // Choices
       if (t === 'select_one' || t === 'select_multiple' || t === 'rank') {
@@ -926,12 +927,26 @@ function buildKoboContent(form) {
         if (!seen.has(listName)) {
           seen.add(listName);
           var choiceVals = q.choice_values || [];
+          var choiceImages = q.choiceImages || {};
           (q.choices || []).forEach(function(c, i) {
             var label = typeof c === 'string' ? c : (c.label || String(c));
             var val = (choiceVals[i] !== undefined && choiceVals[i] !== '') ? String(choiceVals[i]) : String(i);
-            choices.push({ list_name: listName, name: val, label: label });
+            var choiceRow = { list_name: listName, name: val, label: label };
+            // Ajouter l'image si disponible
+            if (choiceImages[i] && choiceImages[i].url) {
+              // KoboToolbox utilise media::image pour les images dans les choix
+              choiceRow['media::image'] = choiceImages[i].url;
+            }
+            choices.push(choiceRow);
           });
         }
+      }
+
+      // Audio — type audio directement supporté par KoboToolbox
+      if (t === 'audio' || t === 'video' || t === 'image' || t === 'file') {
+        // Ces types sont natifs dans XLSForm — rien de spécial à faire
+        // S'assurer que required est absent pour audio optionnel
+        if (q.required === false) delete row.required;
       }
 
       survey.push(row);
@@ -985,10 +1000,33 @@ app.post('/api/generate-image', async (req, res) => {
     // 3. Générer avec DALL-E via OpenAI
     const openaiKey = process.env.OPENAI_API_KEY;
     if (!openaiKey) {
-      // Fallback: utiliser une icône générique via UI Avatars
-      const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(label) + '&size=200&background=E8132A&color=fff&bold=true&font-size=0.4';
-      imageCache[key] = fallbackUrl;
-      return res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
+      // Pas de clé OpenAI — générer une image SVG simple et l'uploader dans Cloudinary
+      try {
+        const initials = label.trim().slice(0, 2).toUpperCase();
+        const colors = ['E8132A','1E40AF','10B981','F59E0B','7C3AED','0891B2','DC2626','059669'];
+        const color = colors[label.charCodeAt(0) % colors.length];
+        const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+          <rect width="200" height="200" rx="20" fill="#${color}"/>
+          <text x="100" y="120" font-family="Arial,sans-serif" font-size="72" font-weight="bold" fill="white" text-anchor="middle">${initials}</text>
+        </svg>`;
+        const svgBuffer = Buffer.from(svgContent);
+        const uploadResult = await new Promise(function(resolve, reject) {
+          const stream = cloudinary.uploader.upload_stream(
+            { public_id: 'digue/choices/' + key, resource_type: 'image', format: 'png',
+              transformation: [{ width: 200, height: 200 }] },
+            function(error, result) { if (error) reject(error); else resolve(result); }
+          );
+          stream.end(svgBuffer);
+        });
+        imageCache[key] = uploadResult.secure_url;
+        console.log('[IMAGE] SVG fallback stocké dans Cloudinary: ' + key);
+        return res.json({ success: true, url: uploadResult.secure_url, fromCache: false, fallback: true });
+      } catch(svgErr) {
+        console.error('[IMAGE] SVG fallback error:', svgErr.message);
+        const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(label) + '&size=200&background=E8132A&color=fff&bold=true';
+        imageCache[key] = fallbackUrl;
+        return res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
+      }
     }
 
     const prompt = 'Simple, clear, flat illustration representing "' + label + '" for a survey questionnaire choice. ' +
@@ -1003,8 +1041,7 @@ app.post('/api/generate-image', async (req, res) => {
 
     if (!imgRes.ok) {
       const e = await imgRes.json();
-      console.error('[IMAGE] DALL-E error:', e.error && e.error.message);
-      // Fallback générique
+      console.error('[IMAGE] OpenAI error:', e.error && e.error.message);
       const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(label) + '&size=200&background=1F4E79&color=fff&bold=true';
       imageCache[key] = fallbackUrl;
       return res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
@@ -1029,7 +1066,6 @@ app.post('/api/generate-image', async (req, res) => {
 
   } catch(err) {
     console.error('[IMAGE ERROR]', err.message);
-    // Toujours retourner quelque chose - fallback générique
     const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(req.body.label || 'img') + '&size=200&background=10B981&color=fff&bold=true';
     res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
   }
