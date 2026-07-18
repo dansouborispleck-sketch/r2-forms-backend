@@ -467,6 +467,50 @@ app.post('/api/deploy/kobo', async (req, res) => {
     const uid = (await assetRes.json()).uid;
 
     const koboContent = buildKoboContent(form);
+
+    // Collecter toutes les images des choix et les uploader dans KoboToolbox
+    const imageAttachments = [];
+    (form.questions || []).forEach(function(q) {
+      var choiceImages = q.choiceImages || {};
+      Object.keys(choiceImages).forEach(function(ci) {
+        var img = choiceImages[ci];
+        if (img && img.url) {
+          var choices = q.choices || [];
+          var label = typeof choices[ci] === 'string' ? choices[ci] : (choices[ci] && choices[ci].label) || ('choice_' + ci);
+          var key = label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').slice(0,50);
+          imageAttachments.push({ url: img.url, filename: key + '.png' });
+        }
+      });
+    });
+
+    // Uploader les images dans KoboToolbox si nécessaire
+    if (imageAttachments.length > 0) {
+      console.log('[DEPLOY] Upload de ' + imageAttachments.length + ' images dans KoboToolbox');
+      for (var ii = 0; ii < imageAttachments.length; ii++) {
+        try {
+          var imgAttach = imageAttachments[ii];
+          // Télécharger l'image depuis Cloudinary
+          var imgFetch = await fetch(imgAttach.url);
+          if (!imgFetch.ok) continue;
+          var imgBuffer = Buffer.from(await imgFetch.arrayBuffer());
+
+          // Uploader dans KoboToolbox comme fichier média du formulaire
+          var mediaFormData = new (require('form-data'))();
+          mediaFormData.append('content', imgBuffer, { filename: imgAttach.filename, contentType: 'image/png' });
+          mediaFormData.append('file_type', 'image');
+
+          await fetch(server + '/api/v2/assets/' + uid + '/files/?format=json', {
+            method: 'POST',
+            headers: { 'Authorization': 'Token ' + token, ...mediaFormData.getHeaders() },
+            body: mediaFormData
+          });
+          console.log('[DEPLOY] Image uploadée dans Kobo: ' + imgAttach.filename);
+        } catch(imgErr) {
+          console.error('[DEPLOY] Erreur upload image:', imgErr.message);
+        }
+      }
+    }
+
     const patchRes = await fetch(server + '/api/v2/assets/' + uid + '/?format=json', {
       method: 'PATCH', headers: auth,
       body: JSON.stringify({ name: form.title || 'Formulaire DIGUE', content: koboContent })
@@ -935,8 +979,10 @@ function buildKoboContent(form) {
             var choiceRow = { list_name: listName, name: val, label: label };
             // Ajouter l'image si disponible
             if (choiceImages[i] && choiceImages[i].url) {
-              // KoboToolbox utilise media::image pour les images dans les choix
-              choiceRow['media::image'] = choiceImages[i].url;
+              // KoboToolbox attend le nom du fichier (pas l'URL) dans media::image
+              var imgLabel = typeof c === 'string' ? c : (c.label || String(c));
+              var imgKey = imgLabel.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').slice(0,50);
+              choiceRow['media::image'] = imgKey + '.png';
             }
             choices.push(choiceRow);
           });
