@@ -990,11 +990,17 @@ app.post('/api/payment/initiate', async (req, res) => {
     }
 
     const tokenData = await tokenRes.json();
-    console.log('[FEDAPAY] Token response:', JSON.stringify(tokenData).slice(0, 200));
-    const token = tokenData.token || (tokenData.v1 && tokenData.v1.token);
+    console.log('[FEDAPAY] Token response:', JSON.stringify(tokenData).slice(0, 300));
+    // FedaPay retourne le token et l'URL directe
+    const token = tokenData.token ||
+                  (tokenData['v1/transaction'] && tokenData['v1/transaction'].token) ||
+                  tokenData.url;
+    const checkoutUrl = tokenData.url ||
+                        (tokenData['v1/transaction'] && tokenData['v1/transaction'].url) ||
+                        'https://sandbox-checkout.fedapay.com/' + token;
 
-    console.log('[FEDAPAY] Transaction creee: ' + transactionId + ' - ' + amount + ' XOF');
-    res.json({ success: true, transactionId: transactionId, token: token, amount: amount });
+    console.log('[FEDAPAY] Transaction creee: ' + transactionId + ' - ' + amount + ' XOF - URL: ' + checkoutUrl);
+    res.json({ success: true, transactionId: transactionId, token: token, checkoutUrl: checkoutUrl, amount: amount });
 
   } catch(err) {
     console.error('[PAYMENT ERROR]', err.message);
