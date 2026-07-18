@@ -1010,7 +1010,9 @@ app.post('/api/generate-image', async (req, res) => {
         const svgBuffer = Buffer.from(svgContent);
         const uploadResult = await new Promise(function(resolve, reject) {
           const stream = cloudinary.uploader.upload_stream(
-            { public_id: 'digue/choices/' + key, resource_type: 'image', format: 'png', transformation: [{ width: 200, height: 200 }] },
+            { public_id: 'digue/choices/' + key, resource_type: 'image', format: 'png',
+              access_mode: 'public', type: 'upload',
+              transformation: [{ width: 200, height: 200 }] },
             function(error, result) { if (error) reject(error); else resolve(result); }
           );
           stream.end(svgBuffer);
@@ -1029,9 +1031,9 @@ app.post('/api/generate-image', async (req, res) => {
       (context ? 'Survey context: ' + context + '. ' : '') +
       'Minimalist icon style, white background, single clear symbol, bright colors, no text, no letters.';
 
-    console.log('[IMAGE] Génération Stability AI pour: ' + label);
+    console.log('[IMAGE] Génération Stability AI pour: ' + label + ' (key: ' + key + ')');
 
-    const formData = new (require('form-data'))();
+    const formData = new FormData();
     formData.append('prompt', prompt);
     formData.append('output_format', 'png');
     formData.append('aspect_ratio', '1:1');
@@ -1062,6 +1064,7 @@ app.post('/api/generate-image', async (req, res) => {
     const uploadResult = await new Promise(function(resolve, reject) {
       const stream = cloudinary.uploader.upload_stream(
         { public_id: 'digue/choices/' + key, overwrite: true, resource_type: 'image',
+          access_mode: 'public', type: 'upload',
           transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }] },
         function(error, result) { if (error) reject(error); else resolve(result); }
       );
@@ -1201,6 +1204,19 @@ app.post('/api/payment/verify', async (req, res) => {
 
   } catch(err) {
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+  }
+});
+
+// Route pour vider le cache images (admin)
+app.post('/api/clear-image-cache', async (req, res) => {
+  try {
+    imageCache = {};
+    // Supprimer toutes les images dans Cloudinary digue/choices/
+    const result = await cloudinary.api.delete_resources_by_prefix('digue/choices/');
+    console.log('[CACHE] Images supprimées:', result);
+    res.json({ success: true, message: 'Cache vidé et images Cloudinary supprimées' });
+  } catch(err) {
+    res.json({ success: true, message: 'Cache mémoire vidé (erreur Cloudinary: ' + err.message + ')' });
   }
 });
 
