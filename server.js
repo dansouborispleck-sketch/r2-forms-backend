@@ -969,8 +969,8 @@ app.post('/api/payment/initiate', async (req, res) => {
 
     // FedaPay retourne la transaction dans différents formats selon la version
     const transactionId = (txData.id) ||
-                          (txData.transaction && txData.transaction.id) ||
-                          (txData['v1/transaction'] && txData['v1/transaction'].transaction && txData['v1/transaction'].transaction.id);
+                          (txData['v1/transaction'] && txData['v1/transaction'].id) ||
+                          (txData.transaction && txData.transaction.id);
 
     if (!transactionId) {
       console.error('[FEDAPAY] ID non trouvé dans:', JSON.stringify(txData).slice(0, 200));
@@ -1018,7 +1018,7 @@ app.post('/api/payment/verify', async (req, res) => {
 
     const data = await verifyRes.json();
     console.log('[FEDAPAY VERIFY]', JSON.stringify(data).slice(0, 200));
-    const tx = data.transaction || (data.v1 && data.v1.transaction) || data;
+    const tx = data['v1/transaction'] || data.transaction || data;
     const status = tx && tx.status;
 
     console.log('[FEDAPAY] Verification ' + transactionId + ': ' + status);
