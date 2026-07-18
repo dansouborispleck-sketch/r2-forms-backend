@@ -494,17 +494,25 @@ app.post('/api/deploy/kobo', async (req, res) => {
           if (!imgFetch.ok) continue;
           var imgBuffer = Buffer.from(await imgFetch.arrayBuffer());
 
-          // Uploader dans KoboToolbox comme fichier média du formulaire
-          var mediaFormData = new (require('form-data'))();
+          // Uploader dans KoboToolbox comme fichier média (section Paramètres > Média)
+          var mediaFormData = new FormData();
+          mediaFormData.append('description', 'image');
+          mediaFormData.append('file_type', 'form_media');
           mediaFormData.append('content', imgBuffer, { filename: imgAttach.filename, contentType: 'image/png' });
-          mediaFormData.append('file_type', 'image');
 
-          await fetch(server + '/api/v2/assets/' + uid + '/files/?format=json', {
+          var mediaRes = await fetch(server + '/api/v2/assets/' + uid + '/files/?format=json', {
             method: 'POST',
             headers: { 'Authorization': 'Token ' + token, ...mediaFormData.getHeaders() },
             body: mediaFormData
           });
-          console.log('[DEPLOY] Image uploadée dans Kobo: ' + imgAttach.filename);
+
+          if (mediaRes.ok) {
+            var mediaData = await mediaRes.json();
+            console.log('[DEPLOY] Image uploadée dans Kobo Media: ' + imgAttach.filename + ' -> ' + (mediaData.uid || 'ok'));
+          } else {
+            var mediaErr = await mediaRes.text();
+            console.error('[DEPLOY] Erreur upload média Kobo: ' + mediaErr.slice(0, 200));
+          }
         } catch(imgErr) {
           console.error('[DEPLOY] Erreur upload image:', imgErr.message);
         }
@@ -521,9 +529,19 @@ app.post('/api/deploy/kobo', async (req, res) => {
       return res.status(502).json({ error: 'PATCH_ERROR', message: 'Erreur import questionnaire. Verifiez le XLSForm.' });
     }
 
+    // Déployer le formulaire
     await fetch(server + '/api/v2/assets/' + uid + '/deployment/?format=json', {
       method: 'POST', headers: auth, body: JSON.stringify({ active: true })
     });
+
+    // Redéployer après upload des médias pour que KoboCollect les télécharge
+    if (imageAttachments.length > 0) {
+      await new Promise(function(r){ setTimeout(r, 2000); });
+      await fetch(server + '/api/v2/assets/' + uid + '/deployment/?format=json', {
+        method: 'PATCH', headers: auth, body: JSON.stringify({ active: true })
+      });
+      console.log('[DEPLOY] Redéploiement avec médias effectué');
+    }
 
     console.log('[DEPLOY] Kobo ok ' + uid);
     res.json({ success: true, uid: uid, url: server + '/#/forms/' + uid + '/summary', questions: (form.questions || []).length });
