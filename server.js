@@ -965,8 +965,17 @@ app.post('/api/payment/initiate', async (req, res) => {
     }
 
     const txData = await txRes.json();
-    const transactionId = txData.v1 && txData.v1.transaction && txData.v1.transaction.id;
-    if (!transactionId) return res.status(502).json({ error: 'PAYMENT_ERROR', message: 'ID transaction non recu.' });
+    console.log('[FEDAPAY] Response:', JSON.stringify(txData).slice(0, 300));
+
+    // FedaPay retourne la transaction dans différents formats selon la version
+    const transactionId = (txData.id) ||
+                          (txData.transaction && txData.transaction.id) ||
+                          (txData.v1 && txData.v1.transaction && txData.v1.transaction.id);
+
+    if (!transactionId) {
+      console.error('[FEDAPAY] ID non trouvé dans:', JSON.stringify(txData).slice(0, 200));
+      return res.status(502).json({ error: 'PAYMENT_ERROR', message: 'ID transaction non recu.' });
+    }
 
     // Generer le token de paiement
     const tokenRes = await fetch(FEDAPAY_BASE + '/v1/transactions/' + transactionId + '/token', {
@@ -975,11 +984,14 @@ app.post('/api/payment/initiate', async (req, res) => {
     });
 
     if (!tokenRes.ok) {
+      const tokenErr = await tokenRes.json();
+      console.error('[FEDAPAY TOKEN ERROR]', JSON.stringify(tokenErr));
       return res.status(502).json({ error: 'TOKEN_ERROR', message: 'Erreur generation token.' });
     }
 
     const tokenData = await tokenRes.json();
-    const token = tokenData.token;
+    console.log('[FEDAPAY] Token response:', JSON.stringify(tokenData).slice(0, 200));
+    const token = tokenData.token || (tokenData.v1 && tokenData.v1.token);
 
     console.log('[FEDAPAY] Transaction creee: ' + transactionId + ' - ' + amount + ' XOF');
     res.json({ success: true, transactionId: transactionId, token: token, amount: amount });
@@ -1005,7 +1017,8 @@ app.post('/api/payment/verify', async (req, res) => {
     if (!verifyRes.ok) return res.status(502).json({ error: 'VERIFY_ERROR' });
 
     const data = await verifyRes.json();
-    const tx = data.v1 && data.v1.transaction;
+    console.log('[FEDAPAY VERIFY]', JSON.stringify(data).slice(0, 200));
+    const tx = data.transaction || (data.v1 && data.v1.transaction) || data;
     const status = tx && tx.status;
 
     console.log('[FEDAPAY] Verification ' + transactionId + ': ' + status);
