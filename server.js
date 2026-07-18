@@ -494,24 +494,32 @@ app.post('/api/deploy/kobo', async (req, res) => {
           if (!imgFetch.ok) continue;
           var imgBuffer = Buffer.from(await imgFetch.arrayBuffer());
 
-          // Uploader dans KoboToolbox comme fichier média (section Paramètres > Média)
+          // Uploader dans KoboToolbox comme fichier média
+          // Format correct: multipart avec file_type=form_media et content=@file
           var mediaFormData = new FormData();
-          mediaFormData.append('description', 'image');
           mediaFormData.append('file_type', 'form_media');
-          mediaFormData.append('content', imgBuffer, { filename: imgAttach.filename, contentType: 'image/png' });
+          mediaFormData.append('content', imgBuffer, {
+            filename: imgAttach.filename,
+            contentType: 'image/png',
+            knownLength: imgBuffer.length
+          });
 
-          var mediaRes = await fetch(server + '/api/v2/assets/' + uid + '/files/?format=json', {
+          var mediaRes = await fetch(server + '/api/v2/assets/' + uid + '/files/', {
             method: 'POST',
-            headers: { 'Authorization': 'Token ' + token, ...mediaFormData.getHeaders() },
+            headers: {
+              'Authorization': 'Token ' + token,
+              ...mediaFormData.getHeaders()
+            },
             body: mediaFormData
           });
 
+          var mediaStatus = mediaRes.status;
           if (mediaRes.ok) {
             var mediaData = await mediaRes.json();
-            console.log('[DEPLOY] Image uploadée dans Kobo Media: ' + imgAttach.filename + ' -> ' + (mediaData.uid || 'ok'));
+            console.log('[DEPLOY] ✅ Image uploadée dans Kobo: ' + imgAttach.filename + ' (status: ' + mediaStatus + ')');
           } else {
             var mediaErr = await mediaRes.text();
-            console.error('[DEPLOY] Erreur upload média Kobo: ' + mediaErr.slice(0, 200));
+            console.error('[DEPLOY] ❌ Erreur upload média Kobo (' + mediaStatus + '): ' + mediaErr.slice(0, 300));
           }
         } catch(imgErr) {
           console.error('[DEPLOY] Erreur upload image:', imgErr.message);
