@@ -1037,7 +1037,7 @@ app.post('/api/generate-image', async (req, res) => {
     formData.append('prompt', prompt);
     formData.append('output_format', 'png');
     formData.append('aspect_ratio', '1:1');
-    formData.append('style_preset', 'flat-design');
+    formData.append('style_preset', 'digital-art');
 
     const imgRes = await fetch('https://api.stability.ai/v2beta/stable-image/generate/core', {
       method: 'POST',
