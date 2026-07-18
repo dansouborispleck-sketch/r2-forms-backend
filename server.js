@@ -9,6 +9,7 @@ const pdf = require('pdf-parse');
 const fetch = require('node-fetch');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
+const FormData = require('form-data');
 
 // Config Cloudinary
 cloudinary.config({
@@ -998,65 +999,73 @@ app.post('/api/generate-image', async (req, res) => {
     }
 
     // 3. Générer avec DALL-E via OpenAI
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
-      // Pas de clé OpenAI — générer une image SVG simple et l'uploader dans Cloudinary
+    const stabilityKey = process.env.STABILITY_API_KEY;
+    if (!stabilityKey) {
+      // Pas de clé Stability — fallback SVG
       try {
         const initials = label.trim().slice(0, 2).toUpperCase();
         const colors = ['E8132A','1E40AF','10B981','F59E0B','7C3AED','0891B2','DC2626','059669'];
         const color = colors[label.charCodeAt(0) % colors.length];
-        const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
-          <rect width="200" height="200" rx="20" fill="#${color}"/>
-          <text x="100" y="120" font-family="Arial,sans-serif" font-size="72" font-weight="bold" fill="white" text-anchor="middle">${initials}</text>
-        </svg>`;
+        const svgContent = '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200"><rect width="200" height="200" rx="20" fill="#' + color + '"/><text x="100" y="120" font-family="Arial,sans-serif" font-size="72" font-weight="bold" fill="white" text-anchor="middle">' + initials + '</text></svg>';
         const svgBuffer = Buffer.from(svgContent);
         const uploadResult = await new Promise(function(resolve, reject) {
           const stream = cloudinary.uploader.upload_stream(
-            { public_id: 'digue/choices/' + key, resource_type: 'image', format: 'png',
-              transformation: [{ width: 200, height: 200 }] },
+            { public_id: 'digue/choices/' + key, resource_type: 'image', format: 'png', transformation: [{ width: 200, height: 200 }] },
             function(error, result) { if (error) reject(error); else resolve(result); }
           );
           stream.end(svgBuffer);
         });
         imageCache[key] = uploadResult.secure_url;
-        console.log('[IMAGE] SVG fallback stocké dans Cloudinary: ' + key);
         return res.json({ success: true, url: uploadResult.secure_url, fromCache: false, fallback: true });
       } catch(svgErr) {
-        console.error('[IMAGE] SVG fallback error:', svgErr.message);
         const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(label) + '&size=200&background=E8132A&color=fff&bold=true';
         imageCache[key] = fallbackUrl;
         return res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
       }
     }
 
-    const prompt = 'Simple, clear, flat illustration representing "' + label + '" for a survey questionnaire choice. ' +
-      (context ? 'Context: ' + context + '. ' : '') +
-      'Minimalist style, white background, one main icon or symbol, bright colors, no text.';
+    // Générer avec Stability AI (Stable Diffusion)
+    const prompt = 'Simple, clear, flat illustration representing "' + label + '" for a data collection survey. ' +
+      (context ? 'Survey context: ' + context + '. ' : '') +
+      'Minimalist icon style, white background, single clear symbol, bright colors, no text, no letters.';
 
-    const imgRes = await fetch('https://api.openai.com/v1/images/generations', {
+    console.log('[IMAGE] Génération Stability AI pour: ' + label);
+
+    const formData = new (require('form-data'))();
+    formData.append('prompt', prompt);
+    formData.append('output_format', 'png');
+    formData.append('aspect_ratio', '1:1');
+    formData.append('style_preset', 'flat-design');
+
+    const imgRes = await fetch('https://api.stability.ai/v2beta/stable-image/generate/core', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + openaiKey },
-      body: JSON.stringify({ model: 'dall-e-3', prompt: prompt, n: 1, size: '1024x1024', quality: 'standard' })
+      headers: {
+        'Authorization': 'Bearer ' + stabilityKey,
+        'Accept': 'image/*',
+        ...formData.getHeaders()
+      },
+      body: formData
     });
 
     if (!imgRes.ok) {
-      const e = await imgRes.json();
-      console.error('[IMAGE] OpenAI error:', e.error && e.error.message);
+      const errText = await imgRes.text();
+      console.error('[IMAGE] Stability AI error:', errText.slice(0, 200));
       const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(label) + '&size=200&background=1F4E79&color=fff&bold=true';
       imageCache[key] = fallbackUrl;
       return res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
     }
 
-    const imgData = await imgRes.json();
-    const imageUrl = imgData.data && imgData.data[0] && imgData.data[0].url;
-    if (!imageUrl) throw new Error('URL image non reçue');
+    const imageBuffer = Buffer.from(await imgRes.arrayBuffer());
+    const imageUrl = null; // On upload directement le buffer
 
-    // 4. Uploader vers Cloudinary pour persistance
-    const uploadResult = await cloudinary.uploader.upload(imageUrl, {
-      public_id: 'digue/choices/' + key,
-      overwrite: false,
-      resource_type: 'image',
-      transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }]
+    // 4. Uploader le buffer vers Cloudinary pour persistance
+    const uploadResult = await new Promise(function(resolve, reject) {
+      const stream = cloudinary.uploader.upload_stream(
+        { public_id: 'digue/choices/' + key, overwrite: true, resource_type: 'image',
+          transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }] },
+        function(error, result) { if (error) reject(error); else resolve(result); }
+      );
+      stream.end(imageBuffer);
     });
 
     const finalUrl = uploadResult.secure_url;
