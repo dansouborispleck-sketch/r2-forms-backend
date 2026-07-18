@@ -933,6 +933,89 @@ function buildKoboContent(form) {
   return { survey: survey, choices: choices, settings: [{ form_title: form.title || 'Formulaire', form_id: formId, version: '1' }] };
 }
 
+// ============ PAIEMENT FEDAPAY ============
+app.post('/api/payment/initiate', async (req, res) => {
+  try {
+    const { amount, description, customer } = req.body;
+    if (!amount || !description) return res.status(400).json({ error: 'Donnees manquantes' });
+
+    const FEDAPAY_SECRET = process.env.FEDAPAY_SECRET_KEY || 'sk_sandbox_MbYxK8aQRbGAkAVjN-p2nTrh';
+    const FEDAPAY_BASE = FEDAPAY_SECRET.includes('sandbox') ? 'https://sandbox-api.fedapay.com' : 'https://api.fedapay.com';
+
+    // Creer une transaction FedaPay
+    const txRes = await fetch(FEDAPAY_BASE + '/v1/transactions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + FEDAPAY_SECRET
+      },
+      body: JSON.stringify({
+        description: description,
+        amount: amount,
+        currency: { iso: 'XOF' },
+        callback_url: 'https://dansouborispleck-sketch.github.io/r2-forms/',
+        customer: customer || { email: 'client@r2forms.bj' }
+      })
+    });
+
+    if (!txRes.ok) {
+      const e = await txRes.json();
+      console.error('[FEDAPAY] Error:', JSON.stringify(e));
+      return res.status(502).json({ error: 'PAYMENT_ERROR', message: 'Erreur initialisation paiement.' });
+    }
+
+    const txData = await txRes.json();
+    const transactionId = txData.v1 && txData.v1.transaction && txData.v1.transaction.id;
+    if (!transactionId) return res.status(502).json({ error: 'PAYMENT_ERROR', message: 'ID transaction non recu.' });
+
+    // Generer le token de paiement
+    const tokenRes = await fetch(FEDAPAY_BASE + '/v1/transactions/' + transactionId + '/token', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + FEDAPAY_SECRET, 'Content-Type': 'application/json' }
+    });
+
+    if (!tokenRes.ok) {
+      return res.status(502).json({ error: 'TOKEN_ERROR', message: 'Erreur generation token.' });
+    }
+
+    const tokenData = await tokenRes.json();
+    const token = tokenData.token;
+
+    console.log('[FEDAPAY] Transaction creee: ' + transactionId + ' - ' + amount + ' XOF');
+    res.json({ success: true, transactionId: transactionId, token: token, amount: amount });
+
+  } catch(err) {
+    console.error('[PAYMENT ERROR]', err.message);
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+  }
+});
+
+app.post('/api/payment/verify', async (req, res) => {
+  try {
+    const { transactionId } = req.body;
+    if (!transactionId) return res.status(400).json({ error: 'Transaction ID manquant' });
+
+    const FEDAPAY_SECRET = process.env.FEDAPAY_SECRET_KEY || 'sk_sandbox_MbYxK8aQRbGAkAVjN-p2nTrh';
+    const FEDAPAY_BASE = FEDAPAY_SECRET.includes('sandbox') ? 'https://sandbox-api.fedapay.com' : 'https://api.fedapay.com';
+
+    const verifyRes = await fetch(FEDAPAY_BASE + '/v1/transactions/' + transactionId, {
+      headers: { 'Authorization': 'Bearer ' + FEDAPAY_SECRET }
+    });
+
+    if (!verifyRes.ok) return res.status(502).json({ error: 'VERIFY_ERROR' });
+
+    const data = await verifyRes.json();
+    const tx = data.v1 && data.v1.transaction;
+    const status = tx && tx.status;
+
+    console.log('[FEDAPAY] Verification ' + transactionId + ': ' + status);
+    res.json({ success: true, status: status, approved: status === 'approved' });
+
+  } catch(err) {
+    res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+  }
+});
+
 app.listen(PORT, function() {
   console.log('\n╔══════════════════════════════════╗\n║   R2 Forms Backend v5.0          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
 });
