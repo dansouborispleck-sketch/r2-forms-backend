@@ -8,6 +8,14 @@ const ExcelJS = require('exceljs');
 const pdf = require('pdf-parse');
 const fetch = require('node-fetch');
 const path = require('path');
+const cloudinary = require('cloudinary').v2;
+
+// Config Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'tk6wqscg',
+  api_key: process.env.CLOUDINARY_API_KEY || '682714838266378',
+  api_secret: process.env.CLOUDINARY_API_SECRET || 'GF3nuz5v7kvuwrcdJUJHqzEzv3g'
+});
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -124,7 +132,10 @@ app.post('/api/analyse', async (req, res) => {
 '- scale -> formats:[{id:"A",name:"Echelle",type:"range",note:"Curseur"}], suggested_format_idx:0\n' +
 '- note -> formats:[{id:"A",name:"Note",type:"note",note:"Texte sans saisie"}], suggested_format_idx:0\n' +
 'IMPORTANT: Chaque question DOIT avoir son tableau formats[] rempli selon sa classe. Ne jamais laisser formats:[]\n\n' +
-'SUGGESTIONS (skip_logic et constraint uniquement):\n' +
+'SUGGESTIONS (skip_logic, constraint et audio uniquement):\n' +
+'AUDIO: Si la question demande une description libre, une narration, un recit, une explication detaillee, une opinion longue, ou tout contenu qui serait mieux capture par la voix (ex: "Decrivez...", "Racontez...", "Expliquez...", "Donnez votre opinion sur...", "Comment decririez-vous...", "Quelles sont vos impressions..."), ajoute une suggestion de type audio:\n' +
+'{"type":"audio","label":"Enregistrement audio","description":"Cette question peut etre mieux repondue par enregistrement vocal","confidence":"high"}\n' +
+'skip_logic et constraint:\n' +
 '{"type":"skip_logic|constraint","label":"court","description":"clair","value":"formule XLSForm avec vrais IDs","confidence":"high|medium|low"}\n\n' +
 'Outil cible: ' + tool;
 
@@ -449,7 +460,7 @@ app.post('/api/deploy/kobo', async (req, res) => {
 
     const assetRes = await fetch(server + '/api/v2/assets/?format=json', {
       method: 'POST', headers: auth,
-      body: JSON.stringify({ name: form.title || 'Formulaire R2', asset_type: 'survey' })
+      body: JSON.stringify({ name: form.title || 'Formulaire DIGUE', asset_type: 'survey' })
     });
     if (!assetRes.ok) return res.status(502).json({ error: 'ASSET_ERROR', message: 'Erreur creation formulaire.' });
     const uid = (await assetRes.json()).uid;
@@ -457,7 +468,7 @@ app.post('/api/deploy/kobo', async (req, res) => {
     const koboContent = buildKoboContent(form);
     const patchRes = await fetch(server + '/api/v2/assets/' + uid + '/?format=json', {
       method: 'PATCH', headers: auth,
-      body: JSON.stringify({ name: form.title || 'Formulaire R2', content: koboContent })
+      body: JSON.stringify({ name: form.title || 'Formulaire DIGUE', content: koboContent })
     });
     if (!patchRes.ok) {
       const errText = await patchRes.text();
@@ -492,7 +503,7 @@ app.post('/api/deploy/jotform', async (req, res) => {
 
     const questions = form.questions || [];
     const jotformQuestions = {};
-    jotformQuestions['0'] = { type: 'control_head', text: form.title || 'Formulaire R2', order: '1', name: 'header' };
+    jotformQuestions['0'] = { type: 'control_head', text: form.title || 'Formulaire DIGUE', order: '1', name: 'header' };
 
     questions.forEach(function(q, qi) {
       var t = q.selectedType || q.type || 'text';
@@ -512,7 +523,7 @@ app.post('/api/deploy/jotform', async (req, res) => {
     });
 
     const createBody = new URLSearchParams();
-    createBody.append('properties[title]', form.title || 'Formulaire R2');
+    createBody.append('properties[title]', form.title || 'Formulaire DIGUE');
     Object.keys(jotformQuestions).forEach(function(key) {
       var q = jotformQuestions[key];
       Object.keys(q).forEach(function(field) {
@@ -552,7 +563,7 @@ app.post('/api/deploy/google', async (req, res) => {
     const createRes = await fetch('https://forms.googleapis.com/v1/forms', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ info: { title: form.title || 'Formulaire R2', documentTitle: form.title || 'Formulaire R2' } })
+      body: JSON.stringify({ info: { title: form.title || 'Formulaire DIGUE', documentTitle: form.title || 'Formulaire DIGUE' } })
     });
     if (!createRes.ok) return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation Google Form.' });
     const formId = (await createRes.json()).formId;
@@ -702,7 +713,7 @@ app.post('/api/deploy/excel', async (req, res) => {
     });
 
     var wb = new ExcelJS.Workbook();
-    wb.creator = 'R2 Forms';
+    wb.creator = 'DIGUE';
     var ws1 = wb.addWorksheet('Saisie');
     var ws2 = wb.addWorksheet('Dictionnaire');
 
@@ -933,6 +944,119 @@ function buildKoboContent(form) {
   return { survey: survey, choices: choices, settings: [{ form_title: form.title || 'Formulaire', form_id: formId, version: '1' }] };
 }
 
+// ============ GENERATION D'IMAGES POUR MODALITES ============
+// Cache en mémoire des images déjà générées (label normalisé -> url Cloudinary)
+var imageCache = {};
+
+function normalizeLabel(label) {
+  return label.toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 50);
+}
+
+app.post('/api/generate-image', async (req, res) => {
+  try {
+    const { label, context } = req.body;
+    if (!label) return res.status(400).json({ error: 'Label manquant' });
+
+    const key = normalizeLabel(label);
+    console.log('[IMAGE] Demande pour: ' + label + ' (key: ' + key + ')');
+
+    // 1. Chercher dans le cache mémoire
+    if (imageCache[key]) {
+      console.log('[IMAGE] Cache hit: ' + key);
+      return res.json({ success: true, url: imageCache[key], fromCache: true });
+    }
+
+    // 2. Chercher dans Cloudinary (base persistante)
+    try {
+      const cloudResult = await cloudinary.api.resource('digue/choices/' + key);
+      if (cloudResult && cloudResult.secure_url) {
+        imageCache[key] = cloudResult.secure_url;
+        console.log('[IMAGE] Cloudinary hit: ' + key);
+        return res.json({ success: true, url: cloudResult.secure_url, fromCache: true });
+      }
+    } catch(cloudErr) {
+      // Image pas encore en Cloudinary - on va la générer
+    }
+
+    // 3. Générer avec DALL-E via OpenAI
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      // Fallback: utiliser une icône générique via UI Avatars
+      const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(label) + '&size=200&background=E8132A&color=fff&bold=true&font-size=0.4';
+      imageCache[key] = fallbackUrl;
+      return res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
+    }
+
+    const prompt = 'Simple, clear, flat illustration representing "' + label + '" for a survey questionnaire choice. ' +
+      (context ? 'Context: ' + context + '. ' : '') +
+      'Minimalist style, white background, one main icon or symbol, bright colors, no text.';
+
+    const imgRes = await fetch('https://api.openai.com/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + openaiKey },
+      body: JSON.stringify({ model: 'dall-e-3', prompt: prompt, n: 1, size: '1024x1024', quality: 'standard' })
+    });
+
+    if (!imgRes.ok) {
+      const e = await imgRes.json();
+      console.error('[IMAGE] DALL-E error:', e.error && e.error.message);
+      // Fallback générique
+      const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(label) + '&size=200&background=1F4E79&color=fff&bold=true';
+      imageCache[key] = fallbackUrl;
+      return res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
+    }
+
+    const imgData = await imgRes.json();
+    const imageUrl = imgData.data && imgData.data[0] && imgData.data[0].url;
+    if (!imageUrl) throw new Error('URL image non reçue');
+
+    // 4. Uploader vers Cloudinary pour persistance
+    const uploadResult = await cloudinary.uploader.upload(imageUrl, {
+      public_id: 'digue/choices/' + key,
+      overwrite: false,
+      resource_type: 'image',
+      transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }]
+    });
+
+    const finalUrl = uploadResult.secure_url;
+    imageCache[key] = finalUrl;
+    console.log('[IMAGE] Générée et stockée: ' + key + ' -> ' + finalUrl);
+    res.json({ success: true, url: finalUrl, fromCache: false });
+
+  } catch(err) {
+    console.error('[IMAGE ERROR]', err.message);
+    // Toujours retourner quelque chose - fallback générique
+    const fallbackUrl = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(req.body.label || 'img') + '&size=200&background=10B981&color=fff&bold=true';
+    res.json({ success: true, url: fallbackUrl, fromCache: false, fallback: true });
+  }
+});
+
+// Upload image utilisateur vers Cloudinary
+app.post('/api/upload-image', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Aucune image reçue' });
+    const key = req.body.key || ('upload_' + Date.now());
+
+    const result = await new Promise(function(resolve, reject) {
+      const stream = cloudinary.uploader.upload_stream(
+        { public_id: 'digue/choices/' + key, resource_type: 'image', transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }] },
+        function(error, result) { if (error) reject(error); else resolve(result); }
+      );
+      stream.end(req.file.buffer);
+    });
+
+    console.log('[UPLOAD] Image uploadée: ' + result.secure_url);
+    res.json({ success: true, url: result.secure_url });
+  } catch(err) {
+    console.error('[UPLOAD ERROR]', err.message);
+    res.status(500).json({ error: 'Erreur upload: ' + err.message });
+  }
+});
+
 // ============ PAIEMENT FEDAPAY ============
 app.post('/api/payment/initiate', async (req, res) => {
   try {
@@ -1036,5 +1160,5 @@ app.post('/api/payment/verify', async (req, res) => {
 });
 
 app.listen(PORT, function() {
-  console.log('\n╔══════════════════════════════════╗\n║   R2 Forms Backend v5.0          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
+  console.log('\n╔══════════════════════════════════╗\n║   DIGUE Backend v5.0          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
 });
