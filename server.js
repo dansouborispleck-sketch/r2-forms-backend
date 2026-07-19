@@ -478,7 +478,7 @@ app.post('/api/deploy/kobo', async (req, res) => {
           var choices = q.choices || [];
           var label = typeof choices[ci] === 'string' ? choices[ci] : (choices[ci] && choices[ci].label) || ('choice_' + ci);
           var key = label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').slice(0,50);
-          imageAttachments.push({ url: img.url, filename: key + '.png' });
+          imageAttachments.push({ url: img.url, cloudinaryUrl: img.url, filename: key + '.png' });
         }
       });
     });
@@ -490,36 +490,52 @@ app.post('/api/deploy/kobo', async (req, res) => {
         try {
           var imgAttach = imageAttachments[ii];
           // Télécharger l'image depuis Cloudinary
-          var imgFetch = await fetch(imgAttach.url);
-          if (!imgFetch.ok) continue;
+          var imgFetch = await fetch(imgAttach.cloudinaryUrl || imgAttach.url);
+          if (!imgFetch.ok) {
+            console.error('[DEPLOY] Impossible de télécharger: ' + imgAttach.filename);
+            continue;
+          }
           var imgBuffer = Buffer.from(await imgFetch.arrayBuffer());
 
-          // Uploader dans KoboToolbox comme fichier média
-          // Format correct: multipart avec file_type=form_media et content=@file
-          var mediaFormData = new FormData();
-          mediaFormData.append('file_type', 'form_media');
-          mediaFormData.append('content', imgBuffer, {
-            filename: imgAttach.filename,
-            contentType: 'image/png',
-            knownLength: imgBuffer.length
-          });
-
-          var mediaRes = await fetch(server + '/api/v2/assets/' + uid + '/files/', {
+          // Méthode 1: Upload via URL Cloudinary (KoboToolbox télécharge lui-même)
+          var urlRes = await fetch(server.replace('kf.','kc.') + '/api/v1/metadata.json', {
             method: 'POST',
-            headers: {
-              'Authorization': 'Token ' + token,
-              ...mediaFormData.getHeaders()
-            },
-            body: mediaFormData
+            headers: { 'Authorization': 'Token ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              data_value: imgAttach.cloudinaryUrl,
+              data_type: 'media',
+              xform: uid,
+              data_file_type: 'image/png',
+              file_hash: imgAttach.filename
+            })
           });
 
-          var mediaStatus = mediaRes.status;
-          if (mediaRes.ok) {
-            var mediaData = await mediaRes.json();
-            console.log('[DEPLOY] ✅ Image uploadée dans Kobo: ' + imgAttach.filename + ' (status: ' + mediaStatus + ')');
+          if (!urlRes.ok) {
+            // Méthode 2: Upload multipart avec le buffer
+            var mediaFormData = new FormData();
+            mediaFormData.append('file_type', 'form_media');
+            mediaFormData.append('description', imgAttach.filename);
+            mediaFormData.append('content', imgBuffer, {
+              filename: imgAttach.filename,
+              contentType: 'image/png',
+              knownLength: imgBuffer.length
+            });
+
+            var mediaRes = await fetch(server + '/api/v2/assets/' + uid + '/files/', {
+              method: 'POST',
+              headers: { 'Authorization': 'Token ' + token, ...mediaFormData.getHeaders() },
+              body: mediaFormData
+            });
+
+            var mediaStatus = mediaRes.status;
+            if (mediaRes.ok) {
+              console.log('[DEPLOY] ✅ Image uploadée (méthode 2): ' + imgAttach.filename);
+            } else {
+              var mediaErr = await mediaRes.text();
+              console.error('[DEPLOY] ❌ Échec méthode 2 (' + mediaStatus + '): ' + mediaErr.slice(0, 200));
+            }
           } else {
-            var mediaErr = await mediaRes.text();
-            console.error('[DEPLOY] ❌ Erreur upload média Kobo (' + mediaStatus + '): ' + mediaErr.slice(0, 300));
+            console.log('[DEPLOY] ✅ Image uploadée via URL: ' + imgAttach.filename);
           }
         } catch(imgErr) {
           console.error('[DEPLOY] Erreur upload image:', imgErr.message);
