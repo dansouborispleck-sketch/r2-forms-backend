@@ -468,7 +468,7 @@ app.post('/api/deploy/kobo', async (req, res) => {
 
     const koboContent = buildKoboContent(form);
 
-    // Collecter toutes les images des choix et les uploader dans KoboToolbox
+    // Collecter les images pour les retourner au frontend (téléchargement ZIP automatique)
     const imageAttachments = [];
     (form.questions || []).forEach(function(q) {
       var choiceImages = q.choiceImages || {};
@@ -478,69 +478,12 @@ app.post('/api/deploy/kobo', async (req, res) => {
           var choices = q.choices || [];
           var label = typeof choices[ci] === 'string' ? choices[ci] : (choices[ci] && choices[ci].label) || ('choice_' + ci);
           var key = label.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').slice(0,50);
-          imageAttachments.push({ url: img.url, cloudinaryUrl: img.url, filename: key + '.png' });
+          imageAttachments.push({ url: img.url, filename: key + '.png', label: label });
         }
       });
     });
-
-    // Uploader les images dans KoboToolbox si nécessaire
     if (imageAttachments.length > 0) {
-      console.log('[DEPLOY] Upload de ' + imageAttachments.length + ' images dans KoboToolbox');
-      for (var ii = 0; ii < imageAttachments.length; ii++) {
-        try {
-          var imgAttach = imageAttachments[ii];
-          // Télécharger l'image depuis Cloudinary
-          var imgFetch = await fetch(imgAttach.cloudinaryUrl || imgAttach.url);
-          if (!imgFetch.ok) {
-            console.error('[DEPLOY] Impossible de télécharger: ' + imgAttach.filename);
-            continue;
-          }
-          var imgBuffer = Buffer.from(await imgFetch.arrayBuffer());
-
-          // Méthode 1: Upload via URL Cloudinary (KoboToolbox télécharge lui-même)
-          var urlRes = await fetch(server.replace('kf.','kc.') + '/api/v1/metadata.json', {
-            method: 'POST',
-            headers: { 'Authorization': 'Token ' + token, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              data_value: imgAttach.cloudinaryUrl,
-              data_type: 'media',
-              xform: uid,
-              data_file_type: 'image/png',
-              file_hash: imgAttach.filename
-            })
-          });
-
-          if (!urlRes.ok) {
-            // Méthode 2: Upload multipart avec le buffer
-            var mediaFormData = new FormData();
-            mediaFormData.append('file_type', 'form_media');
-            mediaFormData.append('description', imgAttach.filename);
-            mediaFormData.append('content', imgBuffer, {
-              filename: imgAttach.filename,
-              contentType: 'image/png',
-              knownLength: imgBuffer.length
-            });
-
-            var mediaRes = await fetch(server + '/api/v2/assets/' + uid + '/files/', {
-              method: 'POST',
-              headers: { 'Authorization': 'Token ' + token, ...mediaFormData.getHeaders() },
-              body: mediaFormData
-            });
-
-            var mediaStatus = mediaRes.status;
-            if (mediaRes.ok) {
-              console.log('[DEPLOY] ✅ Image uploadée (méthode 2): ' + imgAttach.filename);
-            } else {
-              var mediaErr = await mediaRes.text();
-              console.error('[DEPLOY] ❌ Échec méthode 2 (' + mediaStatus + '): ' + mediaErr.slice(0, 200));
-            }
-          } else {
-            console.log('[DEPLOY] ✅ Image uploadée via URL: ' + imgAttach.filename);
-          }
-        } catch(imgErr) {
-          console.error('[DEPLOY] Erreur upload image:', imgErr.message);
-        }
-      }
+      console.log('[DEPLOY] ' + imageAttachments.length + ' images a telecharger par utilisateur');
     }
 
     const patchRes = await fetch(server + '/api/v2/assets/' + uid + '/?format=json', {
@@ -558,17 +501,16 @@ app.post('/api/deploy/kobo', async (req, res) => {
       method: 'POST', headers: auth, body: JSON.stringify({ active: true })
     });
 
-    // Redéployer après upload des médias pour que KoboCollect les télécharge
-    if (imageAttachments.length > 0) {
-      await new Promise(function(r){ setTimeout(r, 2000); });
-      await fetch(server + '/api/v2/assets/' + uid + '/deployment/?format=json', {
-        method: 'PATCH', headers: auth, body: JSON.stringify({ active: true })
-      });
-      console.log('[DEPLOY] Redéploiement avec médias effectué');
-    }
+
 
     console.log('[DEPLOY] Kobo ok ' + uid);
-    res.json({ success: true, uid: uid, url: server + '/#/forms/' + uid + '/summary', questions: (form.questions || []).length });
+    res.json({
+      success: true,
+      uid: uid,
+      url: server + '/#/forms/' + uid + '/summary',
+      questions: (form.questions || []).length,
+      images: imageAttachments  // URLs des images pour téléchargement ZIP côté frontend
+    });
   } catch(err) {
     console.error('[DEPLOY KOBO ERROR]', err.message);
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
@@ -1292,6 +1234,41 @@ app.post('/api/payment/verify', async (req, res) => {
 
   } catch(err) {
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
+  }
+});
+
+// ============ TELECHARGEMENT ZIP DES IMAGES ============
+app.post('/api/download-images-zip', async (req, res) => {
+  try {
+    const { images, title } = req.body;
+    if (!images || images.length === 0) return res.status(400).json({ error: 'Aucune image' });
+
+    const archiver = require('archiver');
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + (title || 'images').replace(/[^a-zA-Z0-9_-]/g,'_') + '_images.zip"');
+    archive.pipe(res);
+
+    for (var i = 0; i < images.length; i++) {
+      var img = images[i];
+      try {
+        var imgRes = await fetch(img.url);
+        if (imgRes.ok) {
+          var imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+          archive.append(imgBuffer, { name: img.filename });
+          console.log('[ZIP] Ajouté: ' + img.filename);
+        }
+      } catch(e) {
+        console.error('[ZIP] Erreur image:', img.filename, e.message);
+      }
+    }
+
+    await archive.finalize();
+    console.log('[ZIP] Archive générée avec ' + images.length + ' images');
+  } catch(err) {
+    console.error('[ZIP ERROR]', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
 
