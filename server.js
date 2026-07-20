@@ -1006,6 +1006,7 @@ app.post('/api/generate-image', async (req, res) => {
   try {
     const { label, context } = req.body;
     if (!label) return res.status(400).json({ error: 'Label manquant' });
+    const apiKey = process.env.ANTHROPIC_API_KEY;
 
     const key = normalizeLabel(label);
     console.log('[IMAGE] Demande pour: ' + label + ' (key: ' + key + ')');
