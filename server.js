@@ -1057,10 +1057,49 @@ app.post('/api/generate-image', async (req, res) => {
     }
 
     // Générer avec Stability AI (Stable Diffusion)
-    const prompt = 'Simple, clear, flat illustration representing "' + label + '" for a data collection survey. ' +
-      (context ? 'Survey context: ' + context + '. ' : '') +
-      'Minimalist icon style, white background, single clear symbol, bright colors, no text, no letters.';
+    // Étape 1: Claude génère un prompt précis et contextuel pour Stability AI
+    console.log('[IMAGE] Génération prompt Claude pour: ' + label + ' (key: ' + key + ')');
 
+    var claudePrompt = "Tu es un expert en creation d'images pour questionnaires de terrain en Afrique. " +
+      "Genere un prompt court et precis en anglais pour Stability AI (modele de generation d'image) " +
+      "qui illustrera la modalite de reponse suivante de facon pertinente et non ambigue.\n\n" +
+      "Modalite: \"" + label + "\"\n" +
+      (context ? "Question: \"" + context + "\"\n" : "") +
+      (req.body.questionnaireTitle ? "Questionnaire: \"" + req.body.questionnaireTitle + "\"\n" : "") +
+      (req.body.questionnaireContext ? "Domaine: \"" + req.body.questionnaireContext + "\"\n" : "") +
+      "\nRegles pour le prompt:\n" +
+      "- Style: flat design illustration, white background, no text, no letters\n" +
+      "- The image must represent ONLY the modality precisely and unambiguously\n" +
+      "- Avoid generic representations (ex: for lower limbs, show only legs/feet not full person)\n" +
+      "- Adapt to medical/field/health context if applicable\n" +
+      "- Maximum 40 words\n\n" +
+      "Reply ONLY with the prompt in English, nothing else.";
+
+    var claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: claudePrompt }]
+      })
+    });
+
+    var stabilityPrompt;
+    if (claudeRes.ok) {
+      var claudeData = await claudeRes.json();
+      stabilityPrompt = claudeData.content && claudeData.content[0] ? claudeData.content[0].text.trim() : null;
+      console.log('[IMAGE] Prompt Claude: ' + stabilityPrompt);
+    }
+
+    // Fallback si Claude échoue
+    if (!stabilityPrompt) {
+      stabilityPrompt = 'Simple, clear, flat illustration representing "' + label + '" for a survey questionnaire. ' +
+        (context ? 'Context: ' + context + '. ' : '') +
+        'Minimalist icon style, white background, single clear symbol, bright colors, no text, no letters.';
+    }
+
+    var prompt = stabilityPrompt;
     console.log('[IMAGE] Génération Stability AI pour: ' + label + ' (key: ' + key + ')');
 
     const formData = new FormData();
@@ -1113,22 +1152,47 @@ app.post('/api/generate-image', async (req, res) => {
   }
 });
 
-// Upload image utilisateur vers Cloudinary
+// Upload image utilisateur vers Cloudinary (dossier privé par session)
 app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Aucune image reçue' });
-    const key = req.body.key || ('upload_' + Date.now());
+
+    // Renommage automatique basé sur la modalité (pas le nom original du fichier)
+    var key = req.body.key || ('upload_' + Date.now());
+    var sessionId = req.body.sessionId || ('sess_' + Date.now());
+    var originalLabel = req.body.originalLabel || key;
+
+    // Normaliser le nom basé sur la modalité
+    var normalizedKey = key.toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').slice(0, 50);
+
+    // Dossier privé unique par session — jamais partagé entre utilisateurs
+    var privatePath = 'digue/user_uploads/' + sessionId + '/' + normalizedKey;
+
+    console.log('[UPLOAD] Image utilisateur: "' + originalLabel + '" -> ' + normalizedKey + '.png (session: ' + sessionId + ')');
 
     const result = await new Promise(function(resolve, reject) {
       const stream = cloudinary.uploader.upload_stream(
-        { public_id: 'digue/choices/' + key, resource_type: 'image', transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }] },
+        {
+          public_id: privatePath,
+          resource_type: 'image',
+          access_mode: 'public',
+          type: 'upload',
+          transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto', format: 'png' }]
+        },
         function(error, result) { if (error) reject(error); else resolve(result); }
       );
       stream.end(req.file.buffer);
     });
 
-    console.log('[UPLOAD] Image uploadée: ' + result.secure_url);
-    res.json({ success: true, url: result.secure_url });
+    console.log('[UPLOAD] ✅ Stocké: ' + result.secure_url);
+    res.json({
+      success: true,
+      url: result.secure_url,
+      filename: normalizedKey + '.png',  // Nom normalisé pour KoboCollect
+      sessionId: sessionId
+    });
   } catch(err) {
     console.error('[UPLOAD ERROR]', err.message);
     res.status(500).json({ error: 'Erreur upload: ' + err.message });
