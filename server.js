@@ -1201,16 +1201,18 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').slice(0, 50);
 
-    // Dossier privé unique par session — jamais partagé entre utilisateurs
+    // Les uploads utilisateurs vont TOUJOURS dans leur dossier privé
+    // La base commune digue/choices/ est gérée uniquement par l'administrateur
     var privatePath = 'digue/user_uploads/' + sessionId + '/' + normalizedKey;
 
-    console.log('[UPLOAD] Image utilisateur: "' + originalLabel + '" -> ' + normalizedKey + '.png (session: ' + sessionId + ')');
+    console.log('[UPLOAD] Image utilisateur: "' + originalLabel + '" -> ' + normalizedKey + '.png (privé)');
 
     const result = await new Promise(function(resolve, reject) {
       const stream = cloudinary.uploader.upload_stream(
         {
           public_id: privatePath,
           resource_type: 'image',
+          overwrite: true,
           access_mode: 'public',
           type: 'upload',
           transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto', format: 'png' }]
@@ -1220,11 +1222,11 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
       stream.end(req.file.buffer);
     });
 
-    console.log('[UPLOAD] ✅ Stocké: ' + result.secure_url);
+    console.log('[UPLOAD] ✅ Stocké en privé: ' + result.secure_url);
     res.json({
       success: true,
       url: result.secure_url,
-      filename: normalizedKey + '.png',  // Nom normalisé pour KoboCollect
+      filename: normalizedKey + '.png',
       sessionId: sessionId
     });
   } catch(err) {
