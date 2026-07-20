@@ -273,21 +273,54 @@ app.post('/api/correct', async (req, res) => {
     if (!form || !instructions) return res.status(400).json({ error: 'Donnees manquantes' });
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'Cle API manquante' });
+    // Alléger le formulaire pour éviter les dépassements de tokens
+    const lightForm = {
+      title: form.title,
+      questions: (form.questions || []).map(function(q) {
+        return {
+          id: q.id, num: q.num, label: q.label, group: q.group,
+          selectedType: q.selectedType, type: q.type,
+          required: q.required, hint: q.hint,
+          choices: q.choices, relevant: q.relevant,
+          formats: q.formats, suggested_format_idx: q.suggested_format_idx,
+          question_class: q.question_class
+        };
+      })
+    };
+
+    const formStr = JSON.stringify(lightForm);
+    console.log('[CORRECT] Formulaire: ' + lightForm.questions.length + ' questions, ' + formStr.length + ' chars');
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-5', max_tokens: 8192,
-        system: 'Expert collecte de donnees. Applique exactement les corrections au formulaire JSON. Preserve tous les accents. Retourne JSON corrige UNIQUEMENT sans markdown.',
-        messages: [{ role: 'user', content: 'Formulaire:\n' + JSON.stringify(form) + '\n\nCorrections:\n' + instructions }]
+        model: 'claude-sonnet-4-5', max_tokens: 32000,
+        system: 'Expert collecte de donnees. Applique exactement les corrections au formulaire JSON. Preserve tous les accents. Retourne le formulaire JSON corrige UNIQUEMENT sans markdown ni explication.',
+        messages: [{ role: 'user', content: 'Formulaire JSON:\n' + formStr + '\n\nCorrections a appliquer:\n' + instructions }]
       })
     });
-    if (!response.ok) return res.status(502).json({ error: 'CLAUDE_ERROR' });
+    if (!response.ok) {
+      const errData = await response.json().catch(function(){return {};});
+      console.error('[CORRECT ERROR]', errData);
+      return res.status(502).json({ error: 'CLAUDE_ERROR', message: errData.error && errData.error.message || 'Erreur Claude' });
+    }
     const data = await response.json();
     let raw = data.content && data.content[0] ? data.content[0].text : '{}';
     raw = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const m = raw.match(/\{[\s\S]*/);
-    const corrected = JSON.parse(m ? m[0] : '{}');
+    let corrected;
+    try {
+      corrected = JSON.parse(m ? m[0] : '{}');
+    } catch(pe) {
+      console.error('[CORRECT PARSE ERROR]', pe.message);
+      return res.status(500).json({ error: 'PARSE_ERROR', message: 'Reponse invalide de Claude' });
+    }
+    // Remerger avec le formulaire original pour préserver les données non transmises
+    corrected.questions = (corrected.questions || []).map(function(cq, i) {
+      var orig = (form.questions || []).find(function(q) { return q.id === cq.id || q.num === cq.num; });
+      return Object.assign({}, orig || {}, cq);
+    });
     res.json({ success: true, form: corrected });
   } catch(err) {
     res.status(500).json({ error: 'SERVER_ERROR', message: err.message });
