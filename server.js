@@ -212,10 +212,8 @@ app.post('/api/analyse', async (req, res) => {
               var lbl = (q.label || '').trim().toLowerCase();
               return lbl.length > 0 && !existingLabels.has(lbl);
             });
-            // Renumeroter en préservant les numéros originaux du questionnaire
-            // Les questions "Précisez/Si autre" reçoivent un ID dérivé (q3_autre)
-            // pour ne pas décaler la numérotation des vraies questions
-            var questionCounter = allQuestions.filter(function(q) { return !q._isAutre; }).length;
+            // Préserver les numéros et IDs originaux fournis par Claude
+            // Ne pas renumeroter — Claude utilise les numéros originaux du questionnaire
             newQs.forEach(function(q, idx) {
               var isAutre = q.label && (
                 q.label.toLowerCase().includes('si autre') ||
@@ -226,25 +224,33 @@ app.post('/api/analyse', async (req, res) => {
                 q.label.toLowerCase().includes('if other') ||
                 q.label.toLowerCase().includes('specify')
               );
+              q._isAutre = isAutre;
+
               if (isAutre) {
-                // Question "Précisez" — ID dérivé de la question précédente
-                q._isAutre = true;
-                var prevQ = allQuestions[allQuestions.length - 1] || newQs[idx - 1];
-                var baseId = prevQ ? (prevQ._baseId || prevQ.id || 'q0') : 'q0';
-                q.id = baseId + '_autre';
-                q.num = allQuestions.length + idx + 1; // Numéro séquentiel pour l'affichage
-                q._baseId = baseId;
+                // Question "Précisez" — s'assurer que l'ID est dérivé
+                var prevQ = idx > 0 ? newQs[idx-1] : allQuestions[allQuestions.length-1];
+                if (prevQ && !q.id.includes('_autre')) {
+                  var baseId = prevQ._isAutre ? (prevQ._baseId || prevQ.id) : prevQ.id;
+                  q._baseId = baseId;
+                  q.id = baseId + '_autre';
+                }
               } else {
-                // Vraie question — numéro original préservé
-                questionCounter++;
-                q.num = q.num || questionCounter; // Garder le numéro original si Claude l'a fourni
-                q.id = 'q' + q.num;
-                q._baseId = q.id;
-                q._isAutre = false;
+                // Vraie question — utiliser le numéro original du questionnaire
+                // Claude fournit num (numéro original) et id (q+num)
+                if (q.num) {
+                  q.id = 'q' + q.num; // S'assurer que l'ID correspond au numéro original
+                  q._baseId = q.id;
+                } else {
+                  // Fallback si Claude n'a pas fourni de numéro
+                  var lastReal = allQuestions.filter(function(qq){ return !qq._isAutre; }).pop();
+                  q.num = lastReal ? lastReal.num + 1 : allQuestions.length + 1;
+                  q.id = 'q' + q.num;
+                  q._baseId = q.id;
+                }
               }
             });
             allQuestions = allQuestions.concat(newQs);
-            previousIds = allQuestions.slice(-10).map(function(q) { return q.id; });
+            previousIds = allQuestions.filter(function(q){ return !q._isAutre; }).slice(-10).map(function(q) { return q.id; });
           }
 
           if (result.groups) result.groups.forEach(function(g) { allGroups.add(g); });
