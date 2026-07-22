@@ -212,10 +212,36 @@ app.post('/api/analyse', async (req, res) => {
               var lbl = (q.label || '').trim().toLowerCase();
               return lbl.length > 0 && !existingLabels.has(lbl);
             });
-            // Renumeroter
+            // Renumeroter en préservant les numéros originaux du questionnaire
+            // Les questions "Précisez/Si autre" reçoivent un ID dérivé (q3_autre)
+            // pour ne pas décaler la numérotation des vraies questions
+            var questionCounter = allQuestions.filter(function(q) { return !q._isAutre; }).length;
             newQs.forEach(function(q, idx) {
-              q.num = allQuestions.length + idx + 1;
-              q.id = 'q' + q.num;
+              var isAutre = q.label && (
+                q.label.toLowerCase().includes('si autre') ||
+                q.label.toLowerCase().includes('precisez') ||
+                q.label.toLowerCase().includes('précisez') ||
+                q.label.toLowerCase().includes('veuillez preciser') ||
+                q.label.toLowerCase().includes('veuillez préciser') ||
+                q.label.toLowerCase().includes('if other') ||
+                q.label.toLowerCase().includes('specify')
+              );
+              if (isAutre) {
+                // Question "Précisez" — ID dérivé de la question précédente
+                q._isAutre = true;
+                var prevQ = allQuestions[allQuestions.length - 1] || newQs[idx - 1];
+                var baseId = prevQ ? (prevQ._baseId || prevQ.id || 'q0') : 'q0';
+                q.id = baseId + '_autre';
+                q.num = allQuestions.length + idx + 1; // Numéro séquentiel pour l'affichage
+                q._baseId = baseId;
+              } else {
+                // Vraie question — numéro original préservé
+                questionCounter++;
+                q.num = q.num || questionCounter; // Garder le numéro original si Claude l'a fourni
+                q.id = 'q' + q.num;
+                q._baseId = q.id;
+                q._isAutre = false;
+              }
             });
             allQuestions = allQuestions.concat(newQs);
             previousIds = allQuestions.slice(-10).map(function(q) { return q.id; });
@@ -243,8 +269,13 @@ app.post('/api/analyse', async (req, res) => {
       return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question detectee.' });
 
     // ========= NIVEAU 2: POST-TRAITEMENT DES SAUTS =========
-    // Construire un index complet des IDs valides
+    // Construire un index complet des IDs valides (incluant IDs dérivés)
     var validIdSet = new Set(allQuestions.map(function(q) { return q.id; }));
+    // Index par numéro original pour la correction des sauts
+    var idByNum = {};
+    allQuestions.forEach(function(q) {
+      if (!q._isAutre) idByNum[q.num] = q.id;
+    });
 
     // Corriger les formules de saut qui utilisent des IDs non séquentiels
     allQuestions.forEach(function(q) {
@@ -260,7 +291,15 @@ app.post('/api/analyse', async (req, res) => {
           var numMatch = refId.match(/\d+/);
           if (numMatch) {
             var num = parseInt(numMatch[0]);
-            var target = allQuestions.find(function(qq) { return qq.num === num; });
+            // Chercher d'abord par numéro original exact
+            var targetId = idByNum[num];
+            if (targetId && validIdSet.has(targetId)) {
+              console.log('[POST-PROCESS] Saut corrigé par num original: ${' + refId + '} -> ${' + targetId + '}');
+              s.value = s.value.replace('${' + refId + '}', '${' + targetId + '}');
+              return;
+            }
+            // Sinon chercher dans allQuestions
+            var target = allQuestions.find(function(qq) { return qq.num === num && !qq._isAutre; });
             if (target && validIdSet.has(target.id)) {
               console.log('[POST-PROCESS] Saut corrigé: ${' + refId + '} -> ${' + target.id + '}');
               s.value = s.value.replace('${' + refId + '}', '${' + target.id + '}');
@@ -302,13 +341,19 @@ app.post('/api/analyse', async (req, res) => {
           var refId = ref.replace('${', '').replace('}', '');
           if (validIdSet.has(refId)) return;
 
-          var numMatch = refId.match(/\d+/);
-          if (numMatch) {
-            var num = parseInt(numMatch[0]);
-            var target = allQuestions.find(function(qq) { return qq.num === num; });
-            if (target && validIdSet.has(target.id)) {
-              console.log('[POST-PROCESS] Relevant corrigé: ${' + refId + '} -> ${' + target.id + '}');
-              q.relevant = q.relevant.replace('${' + refId + '}', '${' + target.id + '}');
+          var numMatch2 = refId.match(/\d+/);
+          if (numMatch2) {
+            var num2 = parseInt(numMatch2[0]);
+            var targetId2 = idByNum[num2];
+            if (targetId2 && validIdSet.has(targetId2)) {
+              console.log('[POST-PROCESS] Relevant corrigé par num original: ${' + refId + '} -> ${' + targetId2 + '}');
+              q.relevant = q.relevant.replace('${' + refId + '}', '${' + targetId2 + '}');
+              return;
+            }
+            var target2 = allQuestions.find(function(qq) { return qq.num === num2 && !qq._isAutre; });
+            if (target2 && validIdSet.has(target2.id)) {
+              console.log('[POST-PROCESS] Relevant corrigé: ${' + refId + '} -> ${' + target2.id + '}');
+              q.relevant = q.relevant.replace('${' + refId + '}', '${' + target2.id + '}');
               return;
             }
           }
