@@ -242,6 +242,106 @@ app.post('/api/analyse', async (req, res) => {
     if (allQuestions.length === 0)
       return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question detectee.' });
 
+    // ========= NIVEAU 2: POST-TRAITEMENT DES SAUTS =========
+    // Construire un index complet des IDs valides
+    var validIdSet = new Set(allQuestions.map(function(q) { return q.id; }));
+
+    // Corriger les formules de saut qui utilisent des IDs non séquentiels
+    allQuestions.forEach(function(q) {
+      if (!q.suggestions) return;
+      q.suggestions.forEach(function(s) {
+        if (s.type !== 'skip_logic' || !s.value) return;
+        var refs = s.value.match(/\$\{([^}]+)\}/g) || [];
+        refs.forEach(function(ref) {
+          var refId = ref.replace('${', '').replace('}', '');
+          if (validIdSet.has(refId)) return; // ID valide — OK
+
+          // Chercher le numéro dans l'ID invalide (ex: sa3 -> 3, lieu5 -> 5)
+          var numMatch = refId.match(/\d+/);
+          if (numMatch) {
+            var num = parseInt(numMatch[0]);
+            var target = allQuestions.find(function(qq) { return qq.num === num; });
+            if (target && validIdSet.has(target.id)) {
+              console.log('[POST-PROCESS] Saut corrigé: ${' + refId + '} -> ${' + target.id + '}');
+              s.value = s.value.replace('${' + refId + '}', '${' + target.id + '}');
+              return;
+            }
+          }
+
+          // Chercher par similarité de label
+          var bestMatch = null, bestScore = 0;
+          allQuestions.forEach(function(qq) {
+            var qqLabel = (qq.label || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'_');
+            var refNorm = refId.toLowerCase().replace(/[^a-z0-9]/g,'_');
+            // Comparer refId avec label normalisé
+            var score = 0;
+            var shorter = refNorm.length < qqLabel.length ? refNorm : qqLabel;
+            var longer = refNorm.length < qqLabel.length ? qqLabel : refNorm;
+            for (var ci = 0; ci < shorter.length; ci++) {
+              if (shorter[ci] === longer[ci]) score++;
+            }
+            score = shorter.length > 0 ? score / longer.length : 0;
+            if (score > bestScore && score > 0.3) { bestScore = score; bestMatch = qq.id; }
+          });
+
+          if (bestMatch) {
+            console.log('[POST-PROCESS] Saut corrigé par label: ${' + refId + '} -> ${' + bestMatch + '} (score:' + bestScore.toFixed(2) + ')');
+            s.value = s.value.replace('${' + refId + '}', '${' + bestMatch + '}');
+          } else {
+            // ID incorrigible — marquer pour correction manuelle par l'utilisateur
+            console.log('[POST-PROCESS] Saut incorrigible marque pour correction: ${' + refId + '}');
+            s._invalid = true;  // Marqué comme invalide — signalé à l'étape 4
+          }
+        });
+      });
+
+      // Corriger aussi le champ relevant directement
+      if (q.relevant) {
+        var relRefs = q.relevant.match(/\$\{([^}]+)\}/g) || [];
+        relRefs.forEach(function(ref) {
+          var refId = ref.replace('${', '').replace('}', '');
+          if (validIdSet.has(refId)) return;
+
+          var numMatch = refId.match(/\d+/);
+          if (numMatch) {
+            var num = parseInt(numMatch[0]);
+            var target = allQuestions.find(function(qq) { return qq.num === num; });
+            if (target && validIdSet.has(target.id)) {
+              console.log('[POST-PROCESS] Relevant corrigé: ${' + refId + '} -> ${' + target.id + '}');
+              q.relevant = q.relevant.replace('${' + refId + '}', '${' + target.id + '}');
+              return;
+            }
+          }
+
+          // Chercher par similarité
+          var bestMatch2 = null, bestScore2 = 0;
+          allQuestions.forEach(function(qq) {
+            var qqLabel = (qq.label || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'_');
+            var refNorm = refId.toLowerCase().replace(/[^a-z0-9]/g,'_');
+            var score = 0;
+            var shorter = refNorm.length < qqLabel.length ? refNorm : qqLabel;
+            var longer = refNorm.length < qqLabel.length ? qqLabel : refNorm;
+            for (var ci2 = 0; ci2 < shorter.length; ci2++) {
+              if (shorter[ci2] === longer[ci2]) score++;
+            }
+            score = shorter.length > 0 ? score / longer.length : 0;
+            if (score > bestScore2 && score > 0.3) { bestScore2 = score; bestMatch2 = qq.id; }
+          });
+
+          if (bestMatch2) {
+            console.log('[POST-PROCESS] Relevant corrigé par label: ${' + refId + '} -> ${' + bestMatch2 + '}');
+            q.relevant = q.relevant.replace('${' + refId + '}', '${' + bestMatch2 + '}');
+          } else {
+            // ID incorrigible — marquer la question pour correction manuelle
+            console.log('[POST-PROCESS] Relevant incorrigible marque pour correction: ${' + refId + '}');
+            q._invalidRelevant = true;  // Signalé à l'étape 4 via le panneau des problèmes
+            // Conserver le relevant original pour que l'utilisateur puisse le voir
+          }
+        });
+      }
+    });
+    // ========= FIN POST-TRAITEMENT =========
+
     var form = {
       title: formTitle || 'Formulaire',
       coherence_report: coherenceReport,
