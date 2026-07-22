@@ -494,7 +494,7 @@ app.post('/api/deploy/kobo', async (req, res) => {
 
     const assetRes = await fetch(server + '/api/v2/assets/?format=json', {
       method: 'POST', headers: auth,
-      body: JSON.stringify({ name: form.title || 'Formulaire DIGUE', asset_type: 'survey' })
+      body: JSON.stringify({ name: form.title || 'Formulaire Lebo', asset_type: 'survey' })
     });
     if (!assetRes.ok) return res.status(502).json({ error: 'ASSET_ERROR', message: 'Erreur creation formulaire.' });
     const uid = (await assetRes.json()).uid;
@@ -521,7 +521,7 @@ app.post('/api/deploy/kobo', async (req, res) => {
 
     const patchRes = await fetch(server + '/api/v2/assets/' + uid + '/?format=json', {
       method: 'PATCH', headers: auth,
-      body: JSON.stringify({ name: form.title || 'Formulaire DIGUE', content: koboContent })
+      body: JSON.stringify({ name: form.title || 'Formulaire Lebo', content: koboContent })
     });
     if (!patchRes.ok) {
       const errText = await patchRes.text();
@@ -565,7 +565,7 @@ app.post('/api/deploy/jotform', async (req, res) => {
 
     const questions = form.questions || [];
     const jotformQuestions = {};
-    jotformQuestions['0'] = { type: 'control_head', text: form.title || 'Formulaire DIGUE', order: '1', name: 'header' };
+    jotformQuestions['0'] = { type: 'control_head', text: form.title || 'Formulaire Lebo', order: '1', name: 'header' };
 
     questions.forEach(function(q, qi) {
       var t = q.selectedType || q.type || 'text';
@@ -585,7 +585,7 @@ app.post('/api/deploy/jotform', async (req, res) => {
     });
 
     const createBody = new URLSearchParams();
-    createBody.append('properties[title]', form.title || 'Formulaire DIGUE');
+    createBody.append('properties[title]', form.title || 'Formulaire Lebo');
     Object.keys(jotformQuestions).forEach(function(key) {
       var q = jotformQuestions[key];
       Object.keys(q).forEach(function(field) {
@@ -625,7 +625,7 @@ app.post('/api/deploy/google', async (req, res) => {
     const createRes = await fetch('https://forms.googleapis.com/v1/forms', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ info: { title: form.title || 'Formulaire DIGUE', documentTitle: form.title || 'Formulaire DIGUE' } })
+      body: JSON.stringify({ info: { title: form.title || 'Formulaire Lebo', documentTitle: form.title || 'Formulaire Lebo' } })
     });
     if (!createRes.ok) return res.status(502).json({ error: 'CREATE_ERROR', message: 'Erreur creation Google Form.' });
     const formId = (await createRes.json()).formId;
@@ -775,7 +775,7 @@ app.post('/api/deploy/excel', async (req, res) => {
     });
 
     var wb = new ExcelJS.Workbook();
-    wb.creator = 'DIGUE';
+    wb.creator = 'Lebo';
     var ws1 = wb.addWorksheet('Saisie');
     var ws2 = wb.addWorksheet('Dictionnaire');
 
@@ -1052,7 +1052,7 @@ app.post('/api/generate-image', async (req, res) => {
 
     // 2. Chercher dans Cloudinary (base persistante)
     try {
-      const cloudResult = await cloudinary.api.resource('digue/choices/' + key);
+      const cloudResult = await cloudinary.api.resource('lebo/choices/' + key);
       if (cloudResult && cloudResult.secure_url) {
         imageCache[key] = cloudResult.secure_url;
         console.log('[IMAGE] Cloudinary hit: ' + key);
@@ -1074,7 +1074,7 @@ app.post('/api/generate-image', async (req, res) => {
         const svgBuffer = Buffer.from(svgContent);
         const uploadResult = await new Promise(function(resolve, reject) {
           const stream = cloudinary.uploader.upload_stream(
-            { public_id: 'digue/choices/' + key, resource_type: 'image', format: 'png',
+            { public_id: 'lebo/choices/' + key, resource_type: 'image', format: 'png',
               access_mode: 'public', type: 'upload',
               transformation: [{ width: 200, height: 200 }] },
             function(error, result) { if (error) reject(error); else resolve(result); }
@@ -1166,7 +1166,7 @@ app.post('/api/generate-image', async (req, res) => {
     // 4. Uploader le buffer vers Cloudinary pour persistance
     const uploadResult = await new Promise(function(resolve, reject) {
       const stream = cloudinary.uploader.upload_stream(
-        { public_id: 'digue/choices/' + key, overwrite: true, resource_type: 'image',
+        { public_id: 'lebo/choices/' + key, overwrite: true, resource_type: 'image',
           access_mode: 'public', type: 'upload',
           transformation: [{ width: 400, height: 400, crop: 'fill', quality: 'auto' }] },
         function(error, result) { if (error) reject(error); else resolve(result); }
@@ -1202,8 +1202,8 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
       .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').slice(0, 50);
 
     // Les uploads utilisateurs vont TOUJOURS dans leur dossier privé
-    // La base commune digue/choices/ est gérée uniquement par l'administrateur
-    var privatePath = 'digue/user_uploads/' + sessionId + '/' + normalizedKey;
+    // La base commune lebo/choices/ est gérée uniquement par l'administrateur
+    var privatePath = 'lebo/user_uploads/' + sessionId + '/' + normalizedKey;
 
     console.log('[UPLOAD] Image utilisateur: "' + originalLabel + '" -> ' + normalizedKey + '.png (privé)');
 
@@ -1376,8 +1376,8 @@ app.post('/api/download-images-zip', async (req, res) => {
 app.post('/api/clear-image-cache', async (req, res) => {
   try {
     imageCache = {};
-    // Supprimer toutes les images dans Cloudinary digue/choices/
-    const result = await cloudinary.api.delete_resources_by_prefix('digue/choices/');
+    // Supprimer toutes les images dans Cloudinary lebo/choices/
+    const result = await cloudinary.api.delete_resources_by_prefix('lebo/choices/');
     console.log('[CACHE] Images supprimées:', result);
     res.json({ success: true, message: 'Cache vidé et images Cloudinary supprimées' });
   } catch(err) {
@@ -1386,5 +1386,5 @@ app.post('/api/clear-image-cache', async (req, res) => {
 });
 
 app.listen(PORT, function() {
-  console.log('\n╔══════════════════════════════════╗\n║   DIGUE Backend v5.0          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
+  console.log('\n╔══════════════════════════════════╗\n║   Lebo Backend v5.0          ║\n║   Port: ' + PORT + '                    ║\n╚══════════════════════════════════╝\n');
 });
