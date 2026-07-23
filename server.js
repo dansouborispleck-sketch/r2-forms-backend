@@ -651,7 +651,7 @@ app.post('/api/deploy/kobo', async (req, res) => {
     if (!assetRes.ok) return res.status(502).json({ error: 'ASSET_ERROR', message: 'Erreur creation formulaire.' });
     const uid = (await assetRes.json()).uid;
 
-    const koboContent = buildKoboContent(form);
+    const koboContent = await buildKoboContent(form);
 
     // Collecter les images pour les retourner au frontend (téléchargement ZIP automatique)
     const imageAttachments = [];
