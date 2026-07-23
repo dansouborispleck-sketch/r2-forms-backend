@@ -1047,135 +1047,84 @@ app.post('/api/deploy/excel', async (req, res) => {
   }
 });
 
-// ============ BUILDER KOBOTOOLBOX ============
-function buildKoboContent(form) {
-  var survey = [];
-  var choices = [];
-  var seen = new Set();
-  var groups = {};
-  var groupOrder = [];
+// ============ GENERATION XLSFORM PAR CLAUDE ============
+async function buildKoboContent(form) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('Cle API manquante');
 
-  (form.questions || []).forEach(function(q) {
-    var g = q.group || 'general';
-    if (!groups[g]) { groups[g] = []; groupOrder.push(g); }
-    groups[g].push(q);
+  // Préparer un formulaire allégé pour Claude
+  const lightForm = {
+    title: form.title,
+    questions: (form.questions || []).map(function(q) {
+      return {
+        id: q.id,
+        num: q.num,
+        label: q.label,
+        type: q.selectedType || q.type || 'text',
+        required: q.required !== false,
+        hint: q.hint || '',
+        choices: (q.choices || []).map(function(c, i) {
+          var label = typeof c === 'string' ? c : (c.label || String(c));
+          var val = (q.choice_values && q.choice_values[i] !== undefined) ? String(q.choice_values[i]) : String(i);
+          return { value: val, label: label };
+        }),
+        group: q.group || 'general',
+        relevant: q.relevant || '',
+        constraint: q.constraint || '',
+        numMin: q.numMin || '',
+        numMax: q.numMax || '',
+        choiceImages: q.choiceImages || {}
+      };
+    })
+  };
+
+  const prompt = 'Tu es un expert XLSForm KoboToolbox. Genere le XLSForm complet pour ce formulaire.\n\n' +
+    'FORMULAIRE JSON:\n' + JSON.stringify(lightForm, null, 2) + '\n\n' +
+    'REGLES STRICTES:\n' +
+    '1. Retourne UNIQUEMENT un JSON valide avec 3 cles: survey, choices, settings\n' +
+    '2. survey: tableau de lignes XLSForm avec type, name, label, required, hint, relevant, constraint\n' +
+    '3. choices: tableau avec list_name, name, label\n' +
+    '4. settings: [{form_title, form_id, version}]\n' +
+    '5. Pour select_one/select_multiple: type = "select_one list_xxx" ou "select_multiple list_xxx"\n' +
+    '6. Les sauts relevant doivent utiliser les IDs exacts fournis dans le JSON\n' +
+    '7. form_id = titre normalise en minuscules sans espaces ni accents\n' +
+    '8. Groupes: begin_group/end_group avec name et label\n' +
+    '9. media::image dans choices si choiceImages disponibles\n' +
+    '10. JAMAIS de markdown ou texte explicatif — JSON pur uniquement\n';
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 32000,
+      system: "Expert XLSForm KoboToolbox. Retourne UNIQUEMENT du JSON valide — pas de markdown, pas d'explication.",
+      messages: [{ role: 'user', content: prompt }]
+    })
   });
 
-  // Corriger les sauts invalides avant de construire
-  var validQIds = new Set((form.questions || []).map(function(q) {
-    return (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
-  }));
+  if (!response.ok) {
+    const e = await response.json();
+    throw new Error('Claude XLSForm error: ' + (e.error && e.error.message || JSON.stringify(e).slice(0, 200)));
+  }
 
-  groupOrder.forEach(function(gname) {
-    var qs = groups[gname];
-    var gId = gname.replace(/\s+/g, '_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]/g, '').slice(0, 32) || 'group';
+  const data = await response.json();
+  let raw = data.content && data.content[0] ? data.content[0].text : '{}';
+  raw = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  const s = raw.indexOf('{');
+  if (s > 0) raw = raw.slice(s);
 
-    if (gname !== 'general') survey.push({ type: 'begin_group', name: gId, label: gname });
-
-    qs.forEach(function(q) {
-      var fmtIdx = q.validatedFormatIdx !== undefined ? q.validatedFormatIdx : (q.suggested_format_idx || 0);
-      var selectedFmt = q.formats && q.formats[fmtIdx] ? q.formats[fmtIdx] : null;
-      var t = q.selectedType || (selectedFmt ? selectedFmt.type : null) || q.type || 'text';
-      var name = (q.id || ('q' + q.num)).replace(/[^a-zA-Z0-9_]/g, '_');
-      var row = { type: t, name: name, label: q.label || '', required: q.required !== false ? 'yes' : 'no', hint: q.hint || '' };
-
-      // Skip logic — verifier que les IDs references existent et pas de cycle
-      var relevant = q.relevant || '';
-      if (!relevant && q.suggestions) {
-        q.suggestions.forEach(function(s, si) {
-          if (s.type === 'skip_logic' && s.value && q.confirmedSuggestions && q.confirmedSuggestions[si]) relevant = s.value;
-        });
-      }
-      if (relevant) {
-        var refs = relevant.match(/\$\{([^}]+)\}/g) || [];
-        // 1. Verifier que tous les IDs existent
-        var allValid = refs.every(function(ref) {
-          return validQIds.has(ref.replace('${', '').replace('}', ''));
-        });
-        if (!allValid) {
-          console.log('[KOBO] Saut invalide ignore pour ' + name + ': ' + relevant);
-          relevant = '';
-        }
-        // 2. Verifier pas de cycle: la question ne peut pas referencer une question qui la referencera
-        if (relevant) {
-          var refIds = refs.map(function(r) { return r.replace('${','').replace('}',''); });
-          var hasCycle = refIds.some(function(refId) {
-            // Chercher si la question referencee a elle-meme un relevant qui pointe vers la question courante
-            var refQ = (form.questions || []).find(function(qq) {
-              return (qq.id || ('q'+qq.num)).replace(/[^a-zA-Z0-9_]/g,'_') === refId;
-            });
-            if (!refQ || !refQ.relevant) return false;
-            var backRefs = (refQ.relevant.match(/\$\{([^}]+)\}/g) || []).map(function(r){ return r.replace('${','').replace('}',''); });
-            return backRefs.indexOf(name) >= 0;
-          });
-          if (hasCycle) {
-            console.log('[KOBO] Cycle detecte et supprime pour ' + name + ': ' + relevant);
-            relevant = '';
-          }
-        }
-        if (relevant) row.relevant = relevant;
-      }
-
-      // Constraints
-      var constraints = [];
-      if (q.numMin !== '' && q.numMin != null) constraints.push('. >= ' + q.numMin);
-      if (q.numMax !== '' && q.numMax != null) constraints.push('. <= ' + q.numMax);
-      if (q.numDigitsBefore) constraints.push('string-length(substring-before(string(.), \'.\')) <= ' + q.numDigitsBefore);
-      if (q.numDigitsAfter) constraints.push('string-length(substring-after(string(.), \'.\')) <= ' + q.numDigitsAfter);
-      if (q.constraint && q.constraint.trim()) constraints.push(q.constraint.trim());
-      if (q.suggestions) {
-        q.suggestions.forEach(function(s, si) {
-          if (s.type === 'constraint' && s.value && q.confirmedSuggestions && q.confirmedSuggestions[si]) constraints.push(s.value);
-        });
-      }
-      if (constraints.length > 0) { row.constraint = constraints.join(' and '); row.constraint_message = 'Valeur hors limites'; }
-
-      if (t === 'range') { row.parameters = 'start=' + (q.numMin || 1) + ' end=' + (q.numMax || 10); delete row.required; }
-      if (t === 'note' || t === 'calculate') delete row.required;
-      if (t === 'audio' && q.required === false) delete row.required;
-
-      // Choices
-      if (t === 'select_one' || t === 'select_multiple' || t === 'rank') {
-        var listName = 'list_' + name;
-        row.type = t + ' ' + listName;
-        if (!seen.has(listName)) {
-          seen.add(listName);
-          var choiceVals = q.choice_values || [];
-          var choiceImages = q.choiceImages || {};
-          (q.choices || []).forEach(function(c, i) {
-            var label = typeof c === 'string' ? c : (c.label || String(c));
-            var val = (choiceVals[i] !== undefined && choiceVals[i] !== '') ? String(choiceVals[i]) : String(i);
-            var choiceRow = { list_name: listName, name: val, label: label };
-            // Ajouter l'image si disponible
-            if (choiceImages[i] && choiceImages[i].url) {
-              // KoboToolbox attend le nom du fichier (pas l'URL) dans media::image
-              var imgLabel = typeof c === 'string' ? c : (c.label || String(c));
-              var imgKey = imgLabel.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').slice(0,50);
-              choiceRow['media::image'] = imgKey + '.png';
-            }
-            choices.push(choiceRow);
-          });
-        }
-      }
-
-      // Audio — type audio directement supporté par KoboToolbox
-      if (t === 'audio' || t === 'video' || t === 'image' || t === 'file') {
-        // Ces types sont natifs dans XLSForm — rien de spécial à faire
-        // S'assurer que required est absent pour audio optionnel
-        if (q.required === false) delete row.required;
-      }
-
-      survey.push(row);
-    });
-
-    if (gname !== 'general') survey.push({ type: 'end_group', name: gId });
-  });
-
-  var formId = (form.title || 'formulaire').replace(/\s+/g, '_').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]/g, '').slice(0, 32);
-  return { survey: survey, choices: choices, settings: [{ form_title: form.title || 'Formulaire', form_id: formId, version: '1' }] };
+  try {
+    const xlsform = JSON.parse(raw);
+    console.log('[XLSFORM] Généré par Claude: ' + (xlsform.survey ? xlsform.survey.length : 0) + ' lignes survey');
+    return xlsform;
+  } catch(e) {
+    console.error('[XLSFORM] Erreur parsing:', e.message, raw.slice(0, 200));
+    throw new Error('XLSForm invalide retourné par Claude');
+  }
 }
 
-// ============ GENERATION D'IMAGES POUR MODALITES ============
+// ============ GENERATION D'IMAGES POUR MODALITES ============// ============ GENERATION D'IMAGES POUR MODALITES ============
 // Cache en mémoire des images déjà générées (label normalisé -> url Cloudinary)
 var imageCache = {};
 
