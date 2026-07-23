@@ -106,7 +106,7 @@ app.post('/api/analyse', async (req, res) => {
     console.log('[ANALYSE] ' + text.length + ' chars -> ' + chunks.length + ' chunks -> ' + tool);
 
     // PASSE 1 — Retranscription complète avec renumérotation
-    const systemPasse1 = 'Expert en collecte de donnees terrain. Tu vas retranscrire integralement le questionnaire avec ta propre numerotation.\n\n' +
+    const system = 'Expert en collecte de donnees terrain. Tu vas retranscrire integralement le questionnaire avec ta propre numerotation.\n\n' +
 'PRINCIPE FONDAMENTAL:\n' +
 '- Tu ignores completement les numeros imprimes dans le document\n' +
 '- Tu lis chaque question dans son integralite et tu lui attribues un numero global continu\n' +
