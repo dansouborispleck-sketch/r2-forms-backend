@@ -171,7 +171,10 @@ app.post('/api/analyse', async (req, res) => {
 '   - JAMAIS le meme numero pour 2 questions differentes\n' +
 '4. CHAMP AUTRES (OBLIGATOIRE):\n' +
 '   - Des qu\'une modalite contient Autre/Autres/Other/Others, insere TOUJOURS "Si autre, precisez :" juste apres\n' +
-'   - num = num_precedent + 0.1 (ex: q3 -> q3_1 num:3.1). La question suivante = num:4\n' +
+'   - num = num_precedent + 0.1 (ex: apres q3 -> id:q3_1 num:3.1). La question suivante = num:4\n' +
+'   - skip_text OBLIGATOIRE: "afficher si q3 = valeur_exacte_Autres_dans_choices" (utilise l\'id de la question PARENTE)\n' +
+'   - La valeur exacte = ce qui est dans choices[] pour Autres (ex: "5", "Autres", "8", etc.)\n' +
+'   - JAMAIS referencer une autre question que la question parente dans le skip_text du precisez\n' +
 '5. TABLEAUX DE SOUS-QUESTIONS (CRITIQUE):\n' +
 '   - Quand un groupe de sous-questions a-j partagent les memes modalites en-tete de tableau\n' +
 '   - TOUTES les sous-questions doivent avoir EXACTEMENT les memes modalites que l\'en-tete\n' +
@@ -295,6 +298,20 @@ app.post('/api/analyse', async (req, res) => {
           questionIndex += '\nATTENTION — TABLEAU EN COURS DETECTE:\n';
           questionIndex += 'Les ' + lastTableQuestions.length + ' dernieres questions partagent les memes modalites: [' + modalitesStr + ']\n';
           questionIndex += 'Si les prochaines questions font partie du meme tableau, elles doivent avoir EXACTEMENT ces memes modalites.\n';
+        }
+
+        // Détecter le groupe en cours
+        var lastGroup = '';
+        for (var gi = allExtracted.length - 1; gi >= 0; gi--) {
+          if (allExtracted[gi].group && allExtracted[gi].group !== 'general') {
+            lastGroup = allExtracted[gi].group;
+            break;
+          }
+        }
+        if (lastGroup) {
+          questionIndex += '\nGROUPE EN COURS: "' + lastGroup + '"\n';
+          questionIndex += 'Si les prochaines questions appartiennent au meme groupe, utilise ce meme groupe.\n';
+          questionIndex += 'Ne change de groupe QUE si tu vois explicitement un nouveau titre de section dans le texte.\n';
         }
 
         questionIndex += '\nREGLE: Pour un saut, utilise l\'id exact (ex: ${q5}).\n';
