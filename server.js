@@ -105,6 +105,56 @@ app.post('/api/analyse', async (req, res) => {
 
     console.log('[ANALYSE] ' + text.length + ' chars -> ' + chunks.length + ' chunks -> ' + tool);
 
+    // ========= PASSE 0: EXTRACTION DE LA LOGIQUE DE NAVIGATION =========
+    // Claude lit le questionnaire ENTIER pour extraire tous les sauts et conditions
+    // avant de chunker pour extraire les questions
+    var navigationMap = {};
+    try {
+      console.log('[PASSE0] Extraction de la logique de navigation...');
+      
+      // Pour les grands questionnaires, on tronque à 12000 chars pour la passe 0
+      var navText = text.length > 12000 ? text.slice(0, 12000) + '\n...[SUITE DU QUESTIONNAIRE TRONQUEE]' : text;
+      
+      var passe0Prompt = 'Lis ce questionnaire et extrais UNIQUEMENT la logique de navigation (sauts et conditions).\n\n' +
+        'Pour chaque saut detecte, indique:\n' +
+        '- La question SOURCE (celle qui genere le saut)\n' +
+        '- La condition exacte (reponse qui declenche le saut)\n' +
+        '- La question CIBLE (celle vers laquelle on saute)\n' +
+        '- Si le saut concerne un GROUPE de questions, liste toutes les questions concernees\n\n' +
+        'QUESTIONNAIRE:\n' + navText + '\n\n' +
+        'Retourne UNIQUEMENT un JSON: {"navigation": [{"source": "description question source", "condition": "condition exacte mot pour mot", "cible": "description question cible", "type": "simple|multi_et|multi_ou|chaine|section|boucle", "questions_concernees": ["desc1","desc2"]}]}\n' +
+        'JAMAIS de markdown. JSON pur uniquement.';
+
+      var passe0Res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-5',
+          max_tokens: 8000,
+          system: 'Expert questionnaires. Extrais la logique de navigation. JSON pur uniquement.',
+          messages: [{ role: 'user', content: passe0Prompt }]
+        })
+      });
+
+      if (passe0Res.ok) {
+        var passe0Data = await passe0Res.json();
+        var passe0Raw = passe0Data.content && passe0Data.content[0] ? passe0Data.content[0].text : '{}';
+
+
+
+        passe0Raw = passe0Raw.replace(/```json/g,'').replace(/```/g,'').trim();
+        var passe0Start = passe0Raw.indexOf('{');
+        if (passe0Start >= 0) passe0Raw = passe0Raw.slice(passe0Start);
+        var passe0Result = JSON.parse(passe0Raw);
+        navigationMap = passe0Result.navigation || [];
+        console.log('[PASSE0] ' + navigationMap.length + ' regles de navigation extraites');
+      }
+    } catch(passe0Err) {
+      console.error('[PASSE0] Erreur (non bloquant):', passe0Err.message);
+      navigationMap = [];
+    }
+    // ========= FIN PASSE 0 =========
+
     // PASSE 1 — Retranscription complète avec renumérotation
     const system = 'Expert en collecte de donnees terrain. Tu vas retranscrire integralement le questionnaire avec ta propre numerotation.\n\n' +
 'PRINCIPE FONDAMENTAL:\n' +
@@ -197,13 +247,57 @@ app.post('/api/analyse', async (req, res) => {
     async function analyseChunk(chunkText, chunkNum, totalChunks, previousIds, allExtracted) {
       // Construire l'index complet des questions déjà extraites pour le contexte
       var questionIndex = '';
+      
+      // Ajouter la carte de navigation de la passe 0
+      if (navigationMap && navigationMap.length > 0) {
+        questionIndex += '\n\nLOGIQUE DE NAVIGATION DETECTEE (extrait du questionnaire complet):\n';
+        navigationMap.forEach(function(nav) {
+          questionIndex += '- ' + nav.type + ': "' + (nav.condition || '') + '" -> ' + (nav.cible || '') + '\n';
+          if (nav.questions_concernees && nav.questions_concernees.length > 0) {
+            questionIndex += '  Questions concernees: ' + nav.questions_concernees.join(', ') + '\n';
+          }
+        });
+        questionIndex += 'Utilise cette logique pour ecrire les skip_text corrects.\n';
+      }
       if (allExtracted && allExtracted.length > 0) {
         questionIndex = '\n\nINDEX GLOBAL DES QUESTIONS DEJA EXTRAITES:\n';
-        questionIndex += '(Utilise ces IDs EXACTEMENT dans les formules de saut — pas les numeros de section)\n';
+        questionIndex += '(Utilise ces IDs EXACTEMENT dans les formules de saut)\n';
         allExtracted.filter(function(q){ return !q._isAutre; }).forEach(function(q) {
-          questionIndex += 'GlobalQ' + q.num + ' (id:' + q.id + ') = "' + (q.label || '').slice(0, 50) + '"\n';
+          var choicesStr = (q.choices || []).slice(0, 5).map(function(c, i) {
+            var lbl = typeof c === 'string' ? c : (c.label || String(c));
+            var val = q.choice_values && q.choice_values[i] !== undefined ? q.choice_values[i] : i;
+            return val + '=' + lbl;
+          }).join(', ');
+          questionIndex += 'Q' + q.num + ' (id:' + q.id + ') = "' + (q.label || '').slice(0, 50) + '"';
+          if (choicesStr) questionIndex += ' [modalites: ' + choicesStr + ']';
+          questionIndex += '\n';
         });
-        questionIndex += '\nREGLE: Pour un saut vers une de ces questions, utilise son id (ex: ${q5}) PAS son numero de section.\n';
+
+        // Détecter le dernier tableau en cours (modalités communes aux sous-questions)
+        var lastTableQuestions = [];
+        var lastChoicesKey = '';
+        for (var li = allExtracted.length - 1; li >= 0; li--) {
+          var lq = allExtracted[li];
+          if (!lq.choices || lq.choices.length === 0) continue;
+          var ck = JSON.stringify(lq.choices);
+          if (!lastChoicesKey) { lastChoicesKey = ck; lastTableQuestions.push(lq); }
+          else if (ck === lastChoicesKey) { lastTableQuestions.push(lq); }
+          else break;
+        }
+        if (lastTableQuestions.length >= 2) {
+          var tableChoices = lastTableQuestions[0].choices;
+          var tableVals = lastTableQuestions[0].choice_values || [];
+          var modalitesStr = tableChoices.map(function(c, i) {
+            var lbl = typeof c === 'string' ? c : (c.label || String(c));
+            var val = tableVals[i] !== undefined ? tableVals[i] : i;
+            return val + '=' + lbl;
+          }).join(', ');
+          questionIndex += '\nATTENTION — TABLEAU EN COURS DETECTE:\n';
+          questionIndex += 'Les ' + lastTableQuestions.length + ' dernieres questions partagent les memes modalites: [' + modalitesStr + ']\n';
+          questionIndex += 'Si les prochaines questions font partie du meme tableau, elles doivent avoir EXACTEMENT ces memes modalites.\n';
+        }
+
+        questionIndex += '\nREGLE: Pour un saut, utilise l\'id exact (ex: ${q5}).\n';
       }
 
       const contextNote = totalChunks > 1
