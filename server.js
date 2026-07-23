@@ -105,49 +105,36 @@ app.post('/api/analyse', async (req, res) => {
 
     console.log('[ANALYSE] ' + text.length + ' chars -> ' + chunks.length + ' chunks -> ' + tool);
 
-    const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions.\n\n' +
+    // PASSE 1 — Retranscription complète avec renumérotation
+    const systemPasse1 = 'Expert en collecte de donnees terrain. Tu vas retranscrire integralement le questionnaire avec ta propre numerotation.\n\n' +
 'PRINCIPE FONDAMENTAL:\n' +
-'- Tu ignores completement les numeros imprimes dans le questionnaire\n' +
+'- Tu ignores completement les numeros imprimes dans le document\n' +
 '- Tu lis chaque question dans son integralite et tu lui attribues un numero global continu\n' +
-'- 1ere question lue = num:1 id:q1, 2eme = num:2 id:q2, etc. JAMAIS num:0 ou id:q0\n' +
-'- Ce numero global est le SEUL qui existe — Lebo suit exactement tes numeros\n\n' +
+'- 1ere question lue = num:1 id:q1, 2eme = num:2 id:q2. JAMAIS num:0\n' +
+'- Tu retranscris AUSSI les sauts en langage naturel mais avec TES nouveaux numeros\n' +
+'- Exemple: document dit "passe a la Q5" mais dans ta numerotation cette question est la 8 -> tu ecris "passe a la question 8"\n\n' +
 'REGLES ABSOLUES:\n' +
 '1. TEXTE INTRODUCTIF: Tout texte AVANT la 1ere vraie question = type note, label = texte integral mot pour mot.\n' +
 '2. FIDELITE ABSOLUE: Copie les libelles MOT POUR MOT. Ne jamais reformuler, inventer ou supprimer.\n' +
-'3. NUMEROTATION GLOBALE CONTINUE (CRITIQUE):\n' +
-'   - Numérote de 1 a N dans l\'ordre exact de lecture\n' +
-'   - MEME SI les sections recommencent a 1 dans le document, continue ton compteur global\n' +
-'   - Exemple: Section1-Q1=num:1, Section1-Q2=num:2, Section2-Q1=num:3\n' +
+'3. NUMEROTATION GLOBALE CONTINUE:\n' +
+'   - Continue ton compteur meme si les sections recommencent a 1 dans le document\n' +
 '   - JAMAIS le meme numero pour 2 questions differentes\n' +
-'   - JAMAIS num:0\n' +
 '4. CHAMP AUTRES (OBLIGATOIRE):\n' +
-'   - Des qu\'une modalite contient Autre/Autres/Other/Others, insere TOUJOURS une question Si autre precisez juste apres\n' +
-'   - Son num = num_question_precedente + 0.1 (ex: apres q3 -> num:3.1, id:q3_1)\n' +
-'   - Son id = id_question_precedente + "_1" (ex: q3_1)\n' +
-'   - required:false, type:qualitative_open\n' +
-'   - Saut: selected(${q3}, valeur_exacte_Autres_dans_choices)\n' +
-'   - La question apres = num:4 id:q4 (pas num:3.2)\n' +
-'5. SAUTS CONDITIONNELS (CRITIQUE):\n' +
-'   - Utilise UNIQUEMENT les IDs globaux que TU as attribues: q1, q2, q3...\n' +
-'   - Cherche la question cible par son CONTENU dans ton index global\n' +
-'   - La valeur = valeur EXACTE de la modalite dans choices[] pas une traduction\n' +
-'   - JAMAIS d\'IDs descriptifs: pas ${sexe}, pas ${sa_sexe}\n' +
-'   - SAUT VERS SECTION: si le saut dit "passe a la Section X" ou "passe a la Partie X", pointe vers la PREMIERE question de cette section\n' +
-'   - CONDITION DE GROUPE: si une instruction dit "les questions suivantes ne concernent que [population]", applique le meme relevant a TOUTES les questions du bloc\n' +
-'6. CONTEXTUALISATION QUESTIONS/GROUPES (CRITIQUE):\n' +
-'   - Ce qui est numérote comme "Question X" dans le document peut etre un GROUPE de sous-questions\n' +
-'   - Exemple: "Question 5 — Logement: 5a. Type? 5b. Pieces? 5c. Occupation?" -> creer 3 vraies questions q5a, q5b, q5c dans le groupe Logement\n' +
-'   - Chaque sous-question recoit son propre num global continu et son propre id\n' +
-'   - Un saut vers "Question 5" qui est un groupe -> pointe vers la PREMIERE sous-question du groupe\n' +
-'   - Detecte aussi les blocs de questions implicites: une serie de questions sur le meme theme sans numerotation explicite = groupe\n' +
-'7. LOGIQUE ENTRE SECTIONS:\n' +
-'   - Analyse la logique de navigation entre sections et pas seulement entre questions individuelles\n' +
-'   - Si une section entiere est conditionnelle (ex: "Section 3 uniquement pour les femmes"), applique le relevant a TOUTES les questions de la section\n' +
-'   - Si un saut court-circuite une section entiere, le relevant pointe vers la premiere question de la section cible\n' +
-'8. GROUPES: Titre complet de la section.\n' +
-'9. ACCENTS: Preserve absolument tous les accents.\n' +
-'10. PAS de suggestions calculate.\n' +
-'11. coherence_report: observations utiles sur la logique du questionnaire.\n\n' +
+'   - Des qu\'une modalite contient Autre/Autres/Other/Others, insere TOUJOURS "Si autre, precisez :" juste apres\n' +
+'   - num = num_precedent + 0.1 (ex: q3 -> q3_1 num:3.1). La question suivante = num:4\n' +
+'5. SAUTS — RETRANSCRIRE AVEC NOUVEAUX NUMEROS:\n' +
+'   - Retranscris les sauts en langage naturel avec tes nouveaux numeros\n' +
+'   - Mets le saut dans le champ "skip_text" de la question concernee\n' +
+'   - Exemple: document dit "si oui passe Q5" et ta Q5 est maintenant ta question 8 -> skip_text: "si oui passe a la question 8"\n' +
+'6. GROUPES ET SECTIONS:\n' +
+'   - Ce qui semble une question peut etre un groupe de sous-questions -> cree les sous-questions individuellement\n' +
+'   - Si une section entiere est conditionnelle, note-le dans skip_text de la premiere question de la section\n' +
+'   - Saut vers une section -> note le num de la premiere question de cette section\n' +
+'7. GROUPES: Titre complet de la section dans "group".\n' +
+'8. ACCENTS: Preserve absolument tous les accents.\n' +
+'9. PAS de suggestions calculate.\n' +
+'10. coherence_report: observations sur la logique du questionnaire.\n\n' +
+'FORMAT JSON — ajoute le champ skip_text pour les sauts en langage naturel:\n' +
 'FORMAT JSON COMPACT:\n' +
 '{"title":"titre","coherence_report":["obs"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"choice_values":[],"group":"TITRE COMPLET","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
 'CLASSES ET FORMATS OBLIGATOIRES:\n' +
@@ -286,6 +273,70 @@ app.post('/api/analyse', async (req, res) => {
 
     if (allQuestions.length === 0)
       return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question detectee.' });
+
+    // ========= PASSE 2: TRADUCTION DES SAUTS EN XLSFORM =========
+    // Maintenant que toutes les questions ont leurs IDs définitifs,
+    // on demande à Claude de traduire les skip_text en formules XLSForm
+    if (allQuestions.some(function(q){ return q.skip_text; })) {
+      console.log('[PASSE2] Traduction des sauts en formules XLSForm...');
+
+      // Construire l'index complet des questions pour la passe 2
+      var questionIndex2 = allQuestions.map(function(q) {
+        return 'Q' + q.num + ' (id:' + q.id + ') — ' + (q.label || '').slice(0, 60) +
+               (q.skip_text ? ' [SAUT: ' + q.skip_text + ']' : '');
+      }).join('\n');
+
+      // Questions avec sauts à traduire
+      var questionsWithSkips = allQuestions.filter(function(q){ return q.skip_text; });
+
+      var passe2Prompt = 'Tu as retranscrit un questionnaire avec ta propre numerotation. ' +
+        'Maintenant traduis les sauts en langage naturel en formules XLSForm.\n\n' +
+        'INDEX COMPLET DES QUESTIONS:\n' + questionIndex2 + '\n\n' +
+        'QUESTIONS A TRADUIRE (avec leur skip_text):\n' +
+        JSON.stringify(questionsWithSkips.map(function(q){
+          return { id: q.id, num: q.num, label: q.label, skip_text: q.skip_text, choices: q.choices, choice_values: q.choice_values };
+        })) + '\n\n' +
+        'REGLES:\n' +
+        '1. Pour chaque question avec skip_text, genere la formule XLSForm "relevant"\n' +
+        '2. Utilise UNIQUEMENT les IDs de l\'index ci-dessus\n' +
+        '3. La valeur = valeur exacte dans choices[] (pas une traduction)\n' +
+        '4. Si saut vers section -> utilise l\'ID de la 1ere question de cette section\n' +
+        '5. Retourne JSON: [{"id":"q5","relevant":"${q3} = \'1\'"},...]\n' +
+        '6. JAMAIS de markdown — JSON pur uniquement\n';
+
+      try {
+        var passe2Res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-5',
+            max_tokens: 16000,
+            system: 'Expert XLSForm. Traduis les sauts en formules. Retourne UNIQUEMENT du JSON valide.',
+            messages: [{ role: 'user', content: passe2Prompt }]
+          })
+        });
+
+        if (passe2Res.ok) {
+          var passe2Data = await passe2Res.json();
+          var passe2Raw = passe2Data.content && passe2Data.content[0] ? passe2Data.content[0].text : '[]';
+          passe2Raw = passe2Raw.replace(/```json[\n]?/g,'').replace(/```[\n]?/g,'').trim();
+          var passe2Start = passe2Raw.indexOf('[');
+          if (passe2Start >= 0) passe2Raw = passe2Raw.slice(passe2Start);
+
+          var relevants = JSON.parse(passe2Raw);
+          relevants.forEach(function(r) {
+            var q = allQuestions.find(function(qq){ return qq.id === r.id; });
+            if (q && r.relevant) {
+              q.relevant = r.relevant;
+              console.log('[PASSE2] Saut traduit: ' + r.id + ' -> ' + r.relevant);
+            }
+          });
+          console.log('[PASSE2] ' + relevants.length + ' sauts traduits');
+        }
+      } catch(passe2Err) {
+        console.error('[PASSE2] Erreur:', passe2Err.message);
+      }
+    }
 
     // ========= NIVEAU 2: POST-TRAITEMENT DES SAUTS =========
     // Construire un index complet des IDs valides (incluant IDs dérivés)
