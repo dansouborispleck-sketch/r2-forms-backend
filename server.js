@@ -144,11 +144,12 @@ app.post('/api/analyse', async (req, res) => {
       // Construire l'index complet des questions déjà extraites pour le contexte
       var questionIndex = '';
       if (allExtracted && allExtracted.length > 0) {
-        questionIndex = '\n\nINDEX COMPLET DES QUESTIONS DEJA EXTRAITES (utilise ces IDs dans les formules de saut):\n';
-        allExtracted.forEach(function(q) {
-          questionIndex += 'Q' + q.num + ' (id:' + q.id + ') — ' + (q.label || '').slice(0, 60) + '\n';
+        questionIndex = '\n\nINDEX GLOBAL DES QUESTIONS DEJA EXTRAITES:\n';
+        questionIndex += '(Utilise ces IDs EXACTEMENT dans les formules de saut — pas les numeros de section)\n';
+        allExtracted.filter(function(q){ return !q._isAutre; }).forEach(function(q) {
+          questionIndex += 'GlobalQ' + q.num + ' (id:' + q.id + ') = "' + (q.label || '').slice(0, 50) + '"\n';
         });
-        questionIndex += '\nPour tout saut vers une de ces questions, utilise son id exact ci-dessus.\n';
+        questionIndex += '\nREGLE: Pour un saut vers une de ces questions, utilise son id (ex: ${q5}) PAS son numero de section.\n';
       }
 
       const contextNote = totalChunks > 1
@@ -222,8 +223,8 @@ app.post('/api/analyse', async (req, res) => {
               var lbl = (q.label || '').trim().toLowerCase();
               return lbl.length > 0 && !existingLabels.has(lbl);
             });
-            // Préserver les numéros et IDs originaux fournis par Claude
-            // Ne pas renumeroter — Claude utilise les numéros originaux du questionnaire
+            // Numérotation globale continue — évite les doublons entre sections
+            // Section 1 Q1=q1, Section 2 Q1=q4 (si 3 questions en section 1)
             newQs.forEach(function(q, idx) {
               var isAutre = q.label && (
                 q.label.toLowerCase().includes('si autre') ||
@@ -235,28 +236,22 @@ app.post('/api/analyse', async (req, res) => {
                 q.label.toLowerCase().includes('specify')
               );
               q._isAutre = isAutre;
+              q._originalNum = q.num; // Conserver le numéro original pour référence
 
               if (isAutre) {
-                // Question "Précisez" — s'assurer que l'ID est dérivé
+                // Question "Précisez" — ID dérivé de la question précédente
                 var prevQ = idx > 0 ? newQs[idx-1] : allQuestions[allQuestions.length-1];
-                if (prevQ && !q.id.includes('_autre')) {
-                  var baseId = prevQ._isAutre ? (prevQ._baseId || prevQ.id) : prevQ.id;
-                  q._baseId = baseId;
-                  q.id = baseId + '_autre';
-                }
+                var baseId = prevQ ? (prevQ._isAutre ? (prevQ._baseId || prevQ.id) : prevQ.id) : 'q0';
+                q._baseId = baseId;
+                q.id = baseId + '_autre';
+                q.num = allQuestions.length + idx + 1;
               } else {
-                // Vraie question — utiliser le numéro original du questionnaire
-                // Claude fournit num (numéro original) et id (q+num)
-                if (q.num) {
-                  q.id = 'q' + q.num; // S'assurer que l'ID correspond au numéro original
-                  q._baseId = q.id;
-                } else {
-                  // Fallback si Claude n'a pas fourni de numéro
-                  var lastReal = allQuestions.filter(function(qq){ return !qq._isAutre; }).pop();
-                  q.num = lastReal ? lastReal.num + 1 : allQuestions.length + 1;
-                  q.id = 'q' + q.num;
-                  q._baseId = q.id;
-                }
+                // Vraie question — numéro global continu
+                var globalNum = allQuestions.filter(function(qq){ return !qq._isAutre; }).length + 1;
+                q._globalNum = globalNum;
+                q.num = globalNum;
+                q.id = 'q' + globalNum;
+                q._baseId = q.id;
               }
             });
             allQuestions = allQuestions.concat(newQs);
