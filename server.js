@@ -223,39 +223,23 @@ app.post('/api/analyse', async (req, res) => {
               var lbl = (q.label || '').trim().toLowerCase();
               return lbl.length > 0 && !existingLabels.has(lbl);
             });
-            // Numérotation globale continue — évite les doublons entre sections
-            // Section 1 Q1=q1, Section 2 Q1=q4 (si 3 questions en section 1)
+            // Claude contrôle TOUT — numérotation ET sauts
+            // Lebo accepte exactement ce que Claude retourne sans rien modifier
+            var existingIds = new Set(allQuestions.map(function(q){ return q.id; }));
             newQs.forEach(function(q, idx) {
-              var isAutre = q.label && (
-                q.label.toLowerCase().includes('si autre') ||
-                q.label.toLowerCase().includes('precisez') ||
-                q.label.toLowerCase().includes('précisez') ||
-                q.label.toLowerCase().includes('veuillez preciser') ||
-                q.label.toLowerCase().includes('veuillez préciser') ||
-                q.label.toLowerCase().includes('if other') ||
-                q.label.toLowerCase().includes('specify')
-              );
-              q._isAutre = isAutre;
-              q._originalNum = q.num; // Conserver le numéro original pour référence
-
-              if (isAutre) {
-                // Question "Précisez" — ID dérivé de la question précédente
-                var prevQ = idx > 0 ? newQs[idx-1] : allQuestions[allQuestions.length-1];
-                var baseId = prevQ ? (prevQ._isAutre ? (prevQ._baseId || prevQ.id) : prevQ.id) : 'q0';
-                q._baseId = baseId;
-                q.id = baseId + '_autre';
-                q.num = allQuestions.length + idx + 1;
-              } else {
-                // Vraie question — numéro global continu
-                var globalNum = allQuestions.filter(function(qq){ return !qq._isAutre; }).length + 1;
-                q._globalNum = globalNum;
-                q.num = globalNum;
-                q.id = 'q' + globalNum;
-                q._baseId = q.id;
+              // Vérifier l'unicité de l'ID — si doublon, corriger silencieusement
+              if (existingIds.has(q.id)) {
+                var lastQ = allQuestions[allQuestions.length - 1];
+                var lastNum = lastQ ? (parseInt(lastQ.id.replace('q','')) || 0) : 0;
+                q.num = lastNum + idx + 1;
+                q.id = 'q' + q.num;
               }
+              q._globalNum = q.num;
+              existingIds.add(q.id);
             });
+
             allQuestions = allQuestions.concat(newQs);
-            previousIds = allQuestions.filter(function(q){ return !q._isAutre; }).slice(-10).map(function(q) { return q.id; });
+            previousIds = allQuestions.slice(-10).map(function(q) { return q.id; });
           }
 
           if (result.groups) result.groups.forEach(function(g) { allGroups.add(g); });
