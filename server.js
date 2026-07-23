@@ -140,13 +140,23 @@ app.post('/api/analyse', async (req, res) => {
 '{"type":"skip_logic|constraint","label":"court","description":"clair","value":"formule XLSForm avec vrais IDs","confidence":"high|medium|low"}\n\n' +
 'Outil cible: ' + tool;
 
-    async function analyseChunk(chunkText, chunkNum, totalChunks, previousIds) {
+    async function analyseChunk(chunkText, chunkNum, totalChunks, previousIds, allExtracted) {
+      // Construire l'index complet des questions déjà extraites pour le contexte
+      var questionIndex = '';
+      if (allExtracted && allExtracted.length > 0) {
+        questionIndex = '\n\nINDEX COMPLET DES QUESTIONS DEJA EXTRAITES (utilise ces IDs dans les formules de saut):\n';
+        allExtracted.forEach(function(q) {
+          questionIndex += 'Q' + q.num + ' (id:' + q.id + ') — ' + (q.label || '').slice(0, 60) + '\n';
+        });
+        questionIndex += '\nPour tout saut vers une de ces questions, utilise son id exact ci-dessus.\n';
+      }
+
       const contextNote = totalChunks > 1
         ? '\n\nPartie ' + chunkNum + '/' + totalChunks + '.' +
           (chunkNum === 1 ? ' Extrait depuis le debut.' : ' Continue — ne repete pas les questions deja extraites.') +
           (chunkNum === totalChunks ? ' Derniere partie.' : '') +
-          (previousIds.length > 0 ? '\nDernieres questions extraites: ' + previousIds.slice(-8).join(', ') : '')
-        : '';
+          questionIndex
+        : questionIndex;
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -200,7 +210,7 @@ app.post('/api/analyse', async (req, res) => {
       for (var attempt = 1; attempt <= 3; attempt++) {
         try {
           if (attempt > 1) await new Promise(function(r) { setTimeout(r, 1500 * attempt); });
-          var result = await analyseChunk(chunks[ci], chunkNum, chunks.length, previousIds);
+          var result = await analyseChunk(chunks[ci], chunkNum, chunks.length, previousIds, allQuestions);
 
           if (chunkNum === 1 && result.title) formTitle = result.title;
           if (result.coherence_report) result.coherence_report.forEach(function(r) { coherenceReport.push(r); });
