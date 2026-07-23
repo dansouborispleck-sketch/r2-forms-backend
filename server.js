@@ -122,18 +122,52 @@ app.post('/api/analyse', async (req, res) => {
 '4. CHAMP AUTRES (OBLIGATOIRE):\n' +
 '   - Des qu\'une modalite contient Autre/Autres/Other/Others, insere TOUJOURS "Si autre, precisez :" juste apres\n' +
 '   - num = num_precedent + 0.1 (ex: q3 -> q3_1 num:3.1). La question suivante = num:4\n' +
-'5. SAUTS — RETRANSCRIRE AVEC NOUVEAUX NUMEROS:\n' +
+'5. TABLEAUX DE SOUS-QUESTIONS (CRITIQUE):\n' +
+'   - Quand un groupe de sous-questions a-j partagent les memes modalites en-tete de tableau\n' +
+'   - TOUTES les sous-questions doivent avoir EXACTEMENT les memes modalites que l\'en-tete\n' +
+'   - Ne jamais substituer ou inventer d\'autres modalites pour les dernieres sous-questions\n' +
+'   - Exemple: si en-tete dit NON/OUI, toutes les sous-questions a jusqu\'a j ont NON/OUI\n' +
+'6. SAUTS — RETRANSCRIRE AVEC NOUVEAUX NUMEROS:\n' +
 '   - Retranscris les sauts en langage naturel avec tes nouveaux numeros\n' +
 '   - Mets le saut dans le champ "skip_text" de la question concernee\n' +
 '   - Exemple: document dit "si oui passe Q5" et ta Q5 est maintenant ta question 8 -> skip_text: "si oui passe a la question 8"\n' +
-'6. GROUPES ET SECTIONS:\n' +
+'7. SAUTS ET LOGIQUE DE NAVIGATION — CAS EXHAUSTIFS:\n' +
+'   OBJECTIF: le repondant voit exactement les bonnes questions selon ses reponses, comme sur le questionnaire papier.\n' +
+'   Pour chaque saut detecte, note-le dans skip_text de la question concernee avec tes nouveaux numeros.\n\n' +
+'   CAS 1 — SAUT SIMPLE: "Si [reponse X] a Q3, passer a Q5"\n' +
+'   -> skip_text sur Q5: "afficher si q3 = X"\n\n' +
+'   CAS 2 — SAUT NEGATIF: "Si Non, passer a Q7" ou "Sauf si..."\n' +
+'   -> skip_text sur Q7: "afficher si q3 != Oui" ou condition inversee\n\n' +
+'   CAS 3 — SAUT SANS CONDITION: "Passez a Q10" (apres une question terminale)\n' +
+'   -> skip_text sur Q10: "toujours afficher apres Q9"\n\n' +
+'   CAS 4 — SAUT MULTI-CONDITIONS ET: "Si Q3=Oui ET Q5=Non" ou "Si Jamais a TOUS les items"\n' +
+'   -> skip_text: "afficher si q3=Oui ET q5=Non" ou "afficher si qa=Jamais ET qb=Jamais ET..."\n\n' +
+'   CAS 5 — SAUT MULTI-CONDITIONS OU: "Si Q3=Oui OU Q5=Oui" ou "Si au moins un item != Jamais"\n' +
+'   -> skip_text: "afficher si q3=Oui OU q5=Oui" ou "afficher si qa!=Jamais OU qb!=Jamais OU..."\n\n' +
+'   CAS 6 — SAUT VERS SECTION: "Passer a la Section X" ou "Passer a la Partie III"\n' +
+'   -> skip_text: "afficher si [condition] — cible: premiere question de la Section X"\n\n' +
+'   CAS 7 — LOGIQUE DE CHAINE PAR ITEM: Si Q1a=NON alors Q2a Q3a Q4a... sont toutes sautees\n' +
+'   -> skip_text sur Q2a Q3a Q4a...: "afficher si q1a=Oui"\n' +
+'   -> Meme logique pour chaque item b c d... independamment\n\n' +
+'   CAS 8 — SECTION CONDITIONNELLE: "Questions suivantes uniquement pour [population]"\n' +
+'   -> skip_text sur TOUTES les questions du bloc: "afficher si [condition population]"\n\n' +
+'   CAS 9 — CHOIX MULTIPLE: "Si Autres selectionne" ou "Si au moins une reponse cochee"\n' +
+'   -> skip_text: "afficher si Autres selectionne dans qX" ou "afficher si qX non vide"\n\n' +
+'   CAS 10 — CONDITION NUMERIQUE: "Si age > 18" ou "Si entre 15 et 25 ans"\n' +
+'   -> skip_text: "afficher si q2 > 18" ou "afficher si q2 >= 15 ET q2 <= 25"\n\n' +
+'   CAS 11 — BOUCLE IMPLICITE: Questions repetees pour chaque item d\'une liste\n' +
+'   -> Creer une question par item avec sa condition propre basee sur la reponse a l\'item correspondant\n\n' +
+'   CAS 12 — SAUT VERS PLUSIEURS QUESTIONS: "Si consomme, passer aux Q3 Q4 et Q5"\n' +
+'   -> skip_text sur Q3 ET Q4 ET Q5: "afficher si [condition]"\n\n' +
+'8. GROUPES ET SECTIONS:\n' +
 '   - Ce qui semble une question peut etre un groupe de sous-questions -> cree les sous-questions individuellement\n' +
 '   - Si une section entiere est conditionnelle, note-le dans skip_text de la premiere question de la section\n' +
 '   - Saut vers une section -> note le num de la premiere question de cette section\n' +
-'7. GROUPES: Titre complet de la section dans "group".\n' +
-'8. ACCENTS: Preserve absolument tous les accents.\n' +
-'9. PAS de suggestions calculate.\n' +
-'10. coherence_report: observations sur la logique du questionnaire.\n\n' +
+'   - Si une section entiere depend d\'une reponse precedente, applique le meme skip_text a toutes ses questions\n' +
+'9. GROUPES: Titre complet de la section dans "group".\n' +
+'10. ACCENTS: Preserve absolument tous les accents.\n' +
+'11. PAS de suggestions calculate.\n' +
+'12. coherence_report: observations sur la logique du questionnaire incluant les sauts complexes detectes.\n\n' +
 'FORMAT JSON — ajoute le champ skip_text pour les sauts en langage naturel:\n' +
 'FORMAT JSON COMPACT:\n' +
 '{"title":"titre","coherence_report":["obs"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"choice_values":[],"group":"TITRE COMPLET","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
@@ -301,8 +335,22 @@ app.post('/api/analyse', async (req, res) => {
         '2. Utilise UNIQUEMENT les IDs de l\'index ci-dessus\n' +
         '3. La valeur = valeur exacte dans choices[] (pas une traduction)\n' +
         '4. Si saut vers section -> utilise l\'ID de la 1ere question de cette section\n' +
-        '5. Retourne JSON: [{"id":"q5","relevant":"${q3} = \'1\'"},...]\n' +
-        '6. JAMAIS de markdown — JSON pur uniquement\n';
+        '5. TRADUCTION DES SAUTS EN XLSFORM — CAS EXHAUSTIFS:\n' +
+        '   Traduis chaque skip_text en formule XLSForm. Utilise la valeur EXACTE des choices[].\n' +
+        '   CAS 1 Simple: "afficher si q3=Oui" -> ${q3} = \'valeur_exacte_Oui\'\n' +
+        '   CAS 2 Negatif: "afficher si q3!=Oui" -> ${q3} != \'valeur_exacte_Oui\'\n' +
+        '   CAS 3 ET: "afficher si q3=X ET q5=Y" -> ${q3} = \'X\' and ${q5} = \'Y\'\n' +
+        '   CAS 4 OU: "afficher si q3=X OU q5=Y" -> ${q3} = \'X\' or ${q5} = \'Y\'\n' +
+        '   CAS 5 Tous items: "afficher si qa=Jamais ET qb=Jamais ET..." -> ${qa} = \'0\' and ${qb} = \'0\' and ...\n' +
+        '   CAS 6 Au moins un: "afficher si qa!=Jamais OU qb!=Jamais..." -> ${qa} != \'0\' or ${qb} != \'0\' or ...\n' +
+        '   CAS 7 Chaine: "afficher si q1a=Oui" -> ${q1a} = \'valeur_exacte_Oui\'\n' +
+        '   CAS 8 Choix multiple: "afficher si Autres selectionne dans qX" -> selected(${qX}, \'valeur_autres\')\n' +
+        '   CAS 9 Non vide: "afficher si qX non vide" -> ${qX} != \'\'\n' +
+        '   CAS 10 Numerique: "afficher si q2>18" -> ${q2} > 18\n' +
+        '   CAS 11 Intervalle: "afficher si q2>=15 ET q2<=25" -> ${q2} >= 15 and ${q2} <= 25\n' +
+        '   CAS 12 Section: "premiere question de Section X" -> utilise l\'ID de cette premiere question\n' +
+        '6. Retourne JSON: [{"id":"q5","relevant":"${q3} = \'1\'"},...]\n' +
+        '7. JAMAIS de markdown — JSON pur uniquement\n';
 
       try {
         var passe2Res = await fetch('https://api.anthropic.com/v1/messages', {
