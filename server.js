@@ -105,16 +105,37 @@ app.post('/api/analyse', async (req, res) => {
 
     console.log('[ANALYSE] ' + text.length + ' chars -> ' + chunks.length + ' chunks -> ' + tool);
 
-    const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions et le texte introductif.\n\n' +
+    const system = 'Expert en collecte de donnees terrain. Analyse le questionnaire et extrais TOUTES les questions.\n\n' +
+'PRINCIPE FONDAMENTAL:\n' +
+'- Tu ignores completement les numeros imprimes dans le questionnaire\n' +
+'- Tu lis chaque question dans son integralite et tu lui attribues un numero global continu\n' +
+'- 1ere question lue = num:1 id:q1, 2eme = num:2 id:q2, etc. JAMAIS num:0 ou id:q0\n' +
+'- Ce numero global est le SEUL qui existe — Lebo suit exactement tes numeros\n\n' +
 'REGLES ABSOLUES:\n' +
-'1. TEXTE AVANT LA PREMIERE QUESTION: Tout texte apparaissant AVANT la premiere question numerotee (avant "1)" ou "Q1" ou "1.") doit IMPERATIVEMENT etre inclus comme premiere question de type "note". REGLES STRICTES: (a) Le label = le texte INTEGRAL copie mot pour mot, JAMAIS un titre invente comme "Introduction" ou "Presentation"; (b) Ne jamais ignorer ce texte meme s\'il semble long; (c) Si le questionnaire n\'a pas de texte introductif, ne pas creer de note fictive.\n' +
-'2. Extrais TOUTES les questions: numerotees, sans numero, sous-questions implicites, questions en entete.\n' +
-'3. GROUPES: Utilise le TITRE COMPLET de la section.\n' +
-'4. ACCENTS: Preserve absolument tous les accents (é, è, à, ù, â, ê, î, ô, û, ç, etc.).\n' +
-'5. CHAMP AUTRES: Quand une modalite contient "Autres" ou "Autre", cree automatiquement une question "Si autre, precisez :" juste apres (required=false).\n' +
-'6. SAUTS: Detecte les conditions. Pour skip_logic, utilise les vrais IDs des questions (format q1, q2...), PAS des IDs inventes.\n' +
-'7. PAS de suggestions de type calculate — le statisticien s\'en charge.\n' +
-'8. coherence_report: observations utiles.\n\n' +
+'1. TEXTE INTRODUCTIF: Tout texte AVANT la 1ere vraie question = type note, label = texte integral mot pour mot.\n' +
+'2. FIDELITE ABSOLUE: Copie les libelles MOT POUR MOT. Ne jamais reformuler, inventer ou supprimer.\n' +
+'3. NUMEROTATION GLOBALE CONTINUE (CRITIQUE):\n' +
+'   - Numérote de 1 a N dans l\'ordre exact de lecture\n' +
+'   - MEME SI les sections recommencent a 1 dans le document, continue ton compteur global\n' +
+'   - Exemple: Section1-Q1=num:1, Section1-Q2=num:2, Section2-Q1=num:3\n' +
+'   - JAMAIS le meme numero pour 2 questions differentes\n' +
+'   - JAMAIS num:0\n' +
+'4. CHAMP AUTRES (OBLIGATOIRE):\n' +
+'   - Des qu\'une modalite contient Autre/Autres/Other/Others, insere TOUJOURS une question Si autre precisez juste apres\n' +
+'   - Son num = num_question_precedente + 0.1 (ex: apres q3 -> num:3.1, id:q3_1)\n' +
+'   - Son id = id_question_precedente + "_1" (ex: q3_1)\n' +
+'   - required:false, type:qualitative_open\n' +
+'   - Saut: selected(${q3}, valeur_exacte_Autres_dans_choices)\n' +
+'   - La question apres = num:4 id:q4 (pas num:3.2)\n' +
+'5. SAUTS CONDITIONNELS (CRITIQUE):\n' +
+'   - Utilise UNIQUEMENT les IDs globaux que TU as attribues: q1, q2, q3...\n' +
+'   - Cherche la question cible par son CONTENU dans ton index global\n' +
+'   - La valeur = valeur EXACTE de la modalite dans choices[] pas une traduction\n' +
+'   - JAMAIS d\'IDs descriptifs: pas ${sexe}, pas ${sa_sexe}\n' +
+'6. GROUPES: Titre complet de la section.\n' +
+'7. ACCENTS: Preserve absolument tous les accents.\n' +
+'8. PAS de suggestions calculate.\n' +
+'9. coherence_report: observations utiles.\n\n' +
 'FORMAT JSON COMPACT:\n' +
 '{"title":"titre","coherence_report":["obs"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"choice_values":[],"group":"TITRE COMPLET","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
 'CLASSES ET FORMATS OBLIGATOIRES:\n' +
@@ -217,23 +238,14 @@ app.post('/api/analyse', async (req, res) => {
           if (result.coherence_report) result.coherence_report.forEach(function(r) { coherenceReport.push(r); });
 
           if (result.questions && Array.isArray(result.questions) && result.questions.length > 0) {
-            // Deduplication par label
-            var existingLabels = new Set(allQuestions.map(function(q) { return (q.label || '').trim().toLowerCase(); }));
-            var newQs = result.questions.filter(function(q) {
-              var lbl = (q.label || '').trim().toLowerCase();
-              return lbl.length > 0 && !existingLabels.has(lbl);
-            });
-            // Claude contrôle TOUT — numérotation ET sauts
-            // Lebo accepte exactement ce que Claude retourne sans rien modifier
+            // Deduplication par ID uniquement — Claude contrôle la numérotation
             var existingIds = new Set(allQuestions.map(function(q){ return q.id; }));
-            newQs.forEach(function(q, idx) {
-              // Vérifier l'unicité de l'ID — si doublon, corriger silencieusement
-              if (existingIds.has(q.id)) {
-                var lastQ = allQuestions[allQuestions.length - 1];
-                var lastNum = lastQ ? (parseInt(lastQ.id.replace('q','')) || 0) : 0;
-                q.num = lastNum + idx + 1;
-                q.id = 'q' + q.num;
-              }
+            var newQs = result.questions.filter(function(q) {
+              // Garder uniquement les questions avec un label non vide et un ID non dupliqué
+              return (q.label || '').trim().length > 0 && !existingIds.has(q.id);
+            });
+            // Lebo suit exactement Claude — aucune modification des numéros
+            newQs.forEach(function(q) {
               q._globalNum = q.num;
               existingIds.add(q.id);
             });
