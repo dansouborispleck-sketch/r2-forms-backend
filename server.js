@@ -132,10 +132,22 @@ app.post('/api/analyse', async (req, res) => {
 '   - Cherche la question cible par son CONTENU dans ton index global\n' +
 '   - La valeur = valeur EXACTE de la modalite dans choices[] pas une traduction\n' +
 '   - JAMAIS d\'IDs descriptifs: pas ${sexe}, pas ${sa_sexe}\n' +
-'6. GROUPES: Titre complet de la section.\n' +
-'7. ACCENTS: Preserve absolument tous les accents.\n' +
-'8. PAS de suggestions calculate.\n' +
-'9. coherence_report: observations utiles.\n\n' +
+'   - SAUT VERS SECTION: si le saut dit "passe a la Section X" ou "passe a la Partie X", pointe vers la PREMIERE question de cette section\n' +
+'   - CONDITION DE GROUPE: si une instruction dit "les questions suivantes ne concernent que [population]", applique le meme relevant a TOUTES les questions du bloc\n' +
+'6. CONTEXTUALISATION QUESTIONS/GROUPES (CRITIQUE):\n' +
+'   - Ce qui est numérote comme "Question X" dans le document peut etre un GROUPE de sous-questions\n' +
+'   - Exemple: "Question 5 — Logement: 5a. Type? 5b. Pieces? 5c. Occupation?" -> creer 3 vraies questions q5a, q5b, q5c dans le groupe Logement\n' +
+'   - Chaque sous-question recoit son propre num global continu et son propre id\n' +
+'   - Un saut vers "Question 5" qui est un groupe -> pointe vers la PREMIERE sous-question du groupe\n' +
+'   - Detecte aussi les blocs de questions implicites: une serie de questions sur le meme theme sans numerotation explicite = groupe\n' +
+'7. LOGIQUE ENTRE SECTIONS:\n' +
+'   - Analyse la logique de navigation entre sections et pas seulement entre questions individuelles\n' +
+'   - Si une section entiere est conditionnelle (ex: "Section 3 uniquement pour les femmes"), applique le relevant a TOUTES les questions de la section\n' +
+'   - Si un saut court-circuite une section entiere, le relevant pointe vers la premiere question de la section cible\n' +
+'8. GROUPES: Titre complet de la section.\n' +
+'9. ACCENTS: Preserve absolument tous les accents.\n' +
+'10. PAS de suggestions calculate.\n' +
+'11. coherence_report: observations utiles sur la logique du questionnaire.\n\n' +
 'FORMAT JSON COMPACT:\n' +
 '{"title":"titre","coherence_report":["obs"],"questions":[{"id":"q1","num":1,"label":"libelle","question_class":"CLASS","type":"TYPE","required":true,"hint":"","choices":[],"choice_values":[],"group":"TITRE COMPLET","formats":[],"suggested_format_idx":0,"suggestions":[]}],"groups":[]}\n\n' +
 'CLASSES ET FORMATS OBLIGATOIRES:\n' +
@@ -1087,10 +1099,15 @@ async function buildKoboContent(form) {
     '4. settings: [{form_title, form_id, version}]\n' +
     '5. Pour select_one/select_multiple: type = "select_one list_xxx" ou "select_multiple list_xxx"\n' +
     '6. Les sauts relevant doivent utiliser les IDs exacts fournis dans le JSON\n' +
-    '7. form_id = titre normalise en minuscules sans espaces ni accents\n' +
-    '8. Groupes: begin_group/end_group avec name et label\n' +
+    '7. form_id = titre normalise en minuscules sans espaces ni accents (max 32 chars)\n' +
+    '8. Groupes: begin_group/end_group avec name et label pour chaque section\n' +
     '9. media::image dans choices si choiceImages disponibles\n' +
-    '10. JAMAIS de markdown ou texte explicatif — JSON pur uniquement\n';
+    '10. JAMAIS de markdown ou texte explicatif — JSON pur uniquement\n' +
+    '11. LOGIQUE SECTIONS: si une section entiere est conditionnelle, applique le relevant a begin_group et toutes ses questions\n' +
+    '12. SAUTS VERS SECTIONS: si un saut pointe vers une section, le relevant pointe vers la premiere question de cette section\n' +
+    '13. SOUS-QUESTIONS: les questions 5a, 5b, 5c doivent etre dans le meme groupe avec des names distincts\n' +
+    '14. Verifie que chaque ID dans les relevant existe bien dans le survey\n' +
+    '15. Verifie qu\'il n\'y a pas de cycles dans les relevant\n';
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
