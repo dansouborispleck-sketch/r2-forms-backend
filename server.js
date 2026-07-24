@@ -419,6 +419,71 @@ app.post('/api/analyse', async (req, res) => {
     if (allQuestions.length === 0)
       return res.status(422).json({ error: 'NO_QUESTIONS', message: 'Aucune question detectee.' });
 
+    // ========= CORRECTION AUTOMATIQUE DES SAUTS "SI AUTRE PRECISEZ" =========
+    // Pour chaque question "Si autre, précisez", le skip_text DOIT référencer sa question parente
+    // On corrige automatiquement sans faire confiance à Claude sur ce point
+    allQuestions.forEach(function(q, idx) {
+      var isAutre = q.label && (
+        q.label.toLowerCase().includes('si autre') ||
+        q.label.toLowerCase().includes('precisez') ||
+        q.label.toLowerCase().includes('précisez') ||
+        q.label.toLowerCase().includes('veuillez preciser') ||
+        q.label.toLowerCase().includes('veuillez préciser')
+      );
+
+      if (isAutre) {
+        // Trouver la question parente (celle juste avant dans la liste)
+        var parentQ = null;
+        for (var pi = idx - 1; pi >= 0; pi--) {
+          var prevQ = allQuestions[pi];
+          var prevIsAutre = prevQ.label && (
+            prevQ.label.toLowerCase().includes('si autre') ||
+            prevQ.label.toLowerCase().includes('precisez') ||
+            prevQ.label.toLowerCase().includes('précisez')
+          );
+          if (!prevIsAutre) {
+            parentQ = prevQ;
+            break;
+          }
+        }
+
+        if (parentQ) {
+          // Vérifier si la valeur "Autres" dans les choices de la question parente
+          var autreValue = null;
+          var choices = parentQ.choices || [];
+          var choiceVals = parentQ.choice_values || [];
+          for (var ci = 0; ci < choices.length; ci++) {
+            var lbl = (typeof choices[ci] === 'string' ? choices[ci] : (choices[ci].label || '')).toLowerCase();
+            if (lbl === 'autres' || lbl === 'autre' || lbl === 'other' || lbl === 'others') {
+              autreValue = choiceVals[ci] !== undefined ? String(choiceVals[ci]) : String(ci);
+              break;
+            }
+          }
+
+          // Corriger le skip_text pour pointer vers la question parente
+          var correctSkipText = autreValue
+            ? 'afficher si ' + parentQ.id + ' = ' + autreValue
+            : 'afficher si ' + parentQ.id + ' = Autres';
+
+          if (q.skip_text !== correctSkipText) {
+            console.log('[AUTO-FIX] Si autre precisez: ' + q.id + ' skip_text corrigé: ' + q.skip_text + ' -> ' + correctSkipText);
+            q.skip_text = correctSkipText;
+          }
+
+          // Aussi corriger le relevant si déjà défini incorrectement
+          if (q.relevant && !q.relevant.includes(parentQ.id)) {
+            var correctRelevant = autreValue
+              ? 'selected(${' + parentQ.id + "}, '" + autreValue + "')"
+              : "${" + parentQ.id + "} = 'autres'";
+            console.log('[AUTO-FIX] Relevant corrigé: ' + q.id + ' -> ' + correctRelevant);
+            q.relevant = correctRelevant;
+          }
+        }
+      }
+    });
+    console.log('[AUTO-FIX] Correction sauts Si autre terminée');
+    // ========= FIN CORRECTION AUTOMATIQUE =========
+
     // ========= PASSE 2: TRADUCTION DES SAUTS EN XLSFORM =========
     // Maintenant que toutes les questions ont leurs IDs définitifs,
     // on demande à Claude de traduire les skip_text en formules XLSForm
