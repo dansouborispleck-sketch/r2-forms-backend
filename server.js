@@ -434,18 +434,36 @@ app.post('/api/analyse', async (req, res) => {
       // Questions avec sauts à traduire
       var questionsWithSkips = allQuestions.filter(function(q){ return q.skip_text; });
 
-      var passe2Prompt = 'Tu as retranscrit un questionnaire avec ta propre numerotation. ' +
-        'Maintenant traduis les sauts en langage naturel en formules XLSForm.\n\n' +
-        'INDEX COMPLET DES QUESTIONS:\n' + questionIndex2 + '\n\n' +
-        'QUESTIONS A TRADUIRE (avec leur skip_text):\n' +
+      // Enrichir l'index avec les labels complets pour recherche par contenu
+      // S'assurer que l'index contient TOUTES les questions sans exception
+      console.log('[PASSE2] Index complet: ' + allQuestions.length + ' questions');
+      var questionIndex2Enrichi = allQuestions.map(function(q) {
+        var choicesStr = (q.choices || []).map(function(c, i) {
+          var lbl = typeof c === 'string' ? c : (c.label || String(c));
+          var val = q.choice_values && q.choice_values[i] !== undefined ? String(q.choice_values[i]) : String(i);
+          return val + '="' + lbl + '"';
+        }).join(', ');
+        return 'ID:' + q.id + ' | NUM:' + q.num + ' | LABEL:"' + (q.label||'').slice(0,80) + '"' +
+               (choicesStr ? ' | MODALITES:[' + choicesStr + ']' : '') +
+               (q.skip_text ? ' | SAUT_A_TRADUIRE:"' + q.skip_text + '"' : '');
+      }).join('\n');
+
+      var passe2Prompt = 'Tu dois traduire des sauts en langage naturel en formules XLSForm exactes.\n\n' +
+        'REGLES STRICTES:\n' +
+        '1. Pour trouver la question cible d\'un saut, cherche dans l\'index par le LABEL ou le contenu — pas par le numero\n' +
+        '2. Utilise UNIQUEMENT les IDs exacts de l\'index (ex: q57a, q3, q12_1)\n' +
+        '3. La valeur dans la formule = la valeur EXACTE dans MODALITES[] — jamais une traduction\n' +
+        '4. Si le skip_text mentionne "afficher si [question X] = [valeur]" -> trouve X dans l\'index par son label -> utilise son ID exact\n' +
+        '5. JAMAIS inventer un ID qui n\'existe pas dans l\'index\n' +
+        '6. Toutes les questions sont dans l\'index — si tu ne trouves pas par ID cherche par label, si tu ne trouves pas par label cherche par contenu similaire — la question EST dans l\'index\n\n' +
+        'INDEX COMPLET DES QUESTIONS (ID | NUM | LABEL | MODALITES):\n' + questionIndex2Enrichi + '\n\n' +
+        'QUESTIONS A TRADUIRE:\n' +
         JSON.stringify(questionsWithSkips.map(function(q){
           return { id: q.id, num: q.num, label: q.label, skip_text: q.skip_text, choices: q.choices, choice_values: q.choice_values };
         })) + '\n\n' +
-        'REGLES:\n' +
-        '1. Pour chaque question avec skip_text, genere la formule XLSForm "relevant"\n' +
-        '2. Utilise UNIQUEMENT les IDs de l\'index ci-dessus\n' +
-        '3. La valeur = valeur exacte dans choices[] (pas une traduction)\n' +
-        '4. Si saut vers section -> utilise l\'ID de la 1ere question de cette section\n' +
+        'REGLES DE TRADUCTION — CAS EXHAUSTIFS:\n' +
+        '1. Recherche la question SOURCE par son label dans l\'index — utilise son ID exact\n' +
+        '2. La valeur = valeur exacte dans MODALITES (ex: si "Oui" a la valeur "1" -> utilise "1")\n' +
         '5. TRADUCTION DES SAUTS EN XLSFORM — CAS EXHAUSTIFS:\n' +
         '   Traduis chaque skip_text en formule XLSForm. Utilise la valeur EXACTE des choices[].\n' +
         '   CAS 1 Simple: "afficher si q3=Oui" -> ${q3} = \'valeur_exacte_Oui\'\n' +
